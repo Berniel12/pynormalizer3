@@ -899,43 +899,43 @@ class TenderTrailIntegration:
         }
 
     def _normalize_tender(self, tender, source_name, processed_count):
-        """Normalize a tender directly based on source format without using preprocessor or normalizer."""
+        """Normalize a tender based on source format without using preprocessor or normalizer"""
         try:
-            # Check source type and apply appropriate normalization
-            if source_name == "ungm" and "title" in tender:
+            if source_name == "ungm" and "notice_title" in tender:
                 return {
-                    "title": tender.get("title", ""),
-                    "description": tender.get("description", ""),
-                    "date_published": tender.get("published_on", ""),
-                    "closing_date": tender.get("deadline_on", ""),
-                    "location": tender.get("beneficiary_countries", ""),
-                    "issuing_authority": tender.get("agency", ""),
+                    "title": tender.get("notice_title", ""),
+                    "description": tender.get("notice_content", ""),
+                    "date_published": tender.get("published_dt", ""),
+                    "location": tender.get("country", ""),
+                    "issuing_authority": "United Nations Global Marketplace",
                     "source": source_name,
                     "raw_id": str(tender.get("id", processed_count)),
+                    "notice_id": tender.get("reference", ""),
+                    "deadline": tender.get("deadline_dt", ""),
                     "processed_at": self._get_current_timestamp()
                 }
-            elif source_name == "afdb" and "title" in tender:
+            elif source_name == "afdb" and "notice_title" in tender:
                 return {
-                    "title": tender.get("title", ""),
-                    "description": tender.get("description", ""),
+                    "title": tender.get("notice_title", ""),
+                    "description": tender.get("notice_content", ""),
                     "date_published": tender.get("publication_date", ""),
-                    "closing_date": tender.get("closing_date", ""),
-                    "tender_value": tender.get("estimated_value", ""),
                     "location": tender.get("country", ""),
+                    "issuing_authority": "African Development Bank",
                     "source": source_name,
                     "raw_id": str(tender.get("id", processed_count)),
+                    "notice_id": tender.get("reference", ""),
                     "processed_at": self._get_current_timestamp()
                 }
-            elif source_name == "wb" and "title" in tender:
+            elif source_name == "wb" and "notice_title" in tender:
                 return {
-                    "title": tender.get("title", ""),
-                    "description": tender.get("description", ""),
+                    "title": tender.get("notice_title", ""),
+                    "description": tender.get("notice_content", ""),
                     "date_published": tender.get("publication_date", ""),
-                    "closing_date": tender.get("deadline", ""),
                     "location": tender.get("country", ""),
-                    "issuing_authority": tender.get("contact_organization", ""),
+                    "issuing_authority": "World Bank",
                     "source": source_name,
                     "raw_id": str(tender.get("id", processed_count)),
+                    "notice_id": tender.get("notice_id", ""),
                     "processed_at": self._get_current_timestamp()
                 }
             elif source_name == "afd" and "notice_title" in tender:
@@ -950,8 +950,35 @@ class TenderTrailIntegration:
                     "notice_id": tender.get("notice_id", ""),
                     "processed_at": self._get_current_timestamp()
                 }
-            else:
-                return None  # Will be handled by standard process
+            elif source_name == "sam_gov" and "opportunity_id" in tender:
+                return {
+                    "title": tender.get("opportunity_title", ""),
+                    "description": tender.get("description", ""),
+                    "date_published": tender.get("posted_date", ""),
+                    "location": tender.get("place_of_performance", ""),
+                    "issuing_authority": "System for Award Management (SAM.gov)",
+                    "source": source_name,
+                    "raw_id": str(tender.get("opportunity_id", "")),
+                    "notice_id": tender.get("solicitation_number", ""),
+                    "deadline": tender.get("response_deadline", ""),
+                    "processed_at": self._get_current_timestamp()
+                }
+            elif source_name == "ted_eu" and "publication_number" in tender:
+                return {
+                    "title": tender.get("title", ""),
+                    "description": tender.get("short_description", ""),
+                    "date_published": tender.get("dispatch_date", ""),
+                    "location": tender.get("nutscode", ""),
+                    "issuing_authority": tender.get("authority_name", "European Union"),
+                    "source": source_name,
+                    "raw_id": str(tender.get("id", processed_count)),
+                    "notice_id": tender.get("publication_number", ""),
+                    "deadline": tender.get("deadline", ""),
+                    "processed_at": self._get_current_timestamp()
+                }
+            
+            # For other sources, try the standard approach via preprocessor and normalizer
+            return None
         except Exception as e:
-            print(f"Error in direct normalization: {e}")
+            self.logger.error(f"Error in direct normalization: {str(e)}")
             return None
