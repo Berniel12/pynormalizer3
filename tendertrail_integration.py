@@ -115,6 +115,17 @@ class TenderTrailIntegration:
                         "language": "en",
                         "id": tender.get("id", processed_count)
                     }
+                elif source_name == "afd" and "notice_title" in tender:
+                    # For AFD, directly map the fields without preprocessing
+                    preprocessed_tender = {
+                        "title": tender.get("notice_title", ""),
+                        "description": tender.get("notice_content", ""),
+                        "publication_date": tender.get("publication_date", ""),
+                        "country": tender.get("country", ""),
+                        "notice_id": tender.get("notice_id", ""),
+                        "language": "fr",
+                        "id": tender.get("id", processed_count)
+                    }
                 else:
                     # For other sources or if direct mapping failed, try preprocessing
                     try:
