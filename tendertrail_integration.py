@@ -102,32 +102,83 @@ class TenderTrailIntegration:
     
     def _ensure_dict(self, data: Any) -> Dict[str, Any]:
         """Ensure that data is a dictionary."""
+        # Add more debugging
+        print(f"Ensuring dictionary for data of type: {type(data)}")
+        
+        # Check for dict directly first
         if isinstance(data, dict):
             return data
         
+        # Handle string case
         if isinstance(data, str):
             try:
                 parsed = json.loads(data)
                 if isinstance(parsed, dict):
                     return parsed
+                elif isinstance(parsed, list) and len(parsed) > 0 and isinstance(parsed[0], dict):
+                    # If it's a list with dict as first item, return that
+                    return parsed[0]
                 else:
-                    raise ValueError(f"Parsed JSON is not a dictionary but a {type(parsed)}")
+                    # Create a simple wrapper dict for the parsed data
+                    return {"data": parsed, "id": "unknown"}
             except Exception as e:
-                raise ValueError(f"Could not parse string as JSON: {e}")
+                # For strings that aren't JSON, create a simple container
+                return {"text": data, "id": "unknown"}
         
-        # Check if it's a database record with data in a 'data' field or similar
+        # Handle list case
+        if isinstance(data, list) and len(data) > 0:
+            if isinstance(data[0], dict):
+                return data[0]
+            # Try to parse first item if it's a string
+            elif isinstance(data[0], str):
+                try:
+                    parsed = json.loads(data[0])
+                    if isinstance(parsed, dict):
+                        return parsed
+                except:
+                    pass
+        
+        # Check for common object patterns with get methods
         if hasattr(data, 'get') and callable(data.get):
-            # It might be a record-like object with a get method
-            if 'data' in data and isinstance(data.get('data'), dict):
-                return data.get('data')
+            # Try to access common tender fields
+            common_fields = ['id', 'title', 'description', 'data']
+            result = {}
             
-            # Check if it has common tender fields
-            for field in ['id', 'title', 'description']:
-                if field in data:
-                    return data
+            # Build a dict from available fields
+            for field in common_fields:
+                try:
+                    value = data.get(field)
+                    if value is not None:
+                        result[field] = value
+                except:
+                    pass
+            
+            # If we found any fields, return the constructed dict
+            if result:
+                return result
+            
+            # Special case for 'data' field that might contain nested data
+            try:
+                data_field = data.get('data')
+                if isinstance(data_field, dict):
+                    return data_field
+                elif isinstance(data_field, str):
+                    try:
+                        parsed = json.loads(data_field)
+                        if isinstance(parsed, dict):
+                            return parsed
+                    except:
+                        pass
+            except:
+                pass
         
-        # If we got here, we couldn't make it a dict
-        raise ValueError(f"Cannot convert {type(data)} to dictionary")
+        # Last resort: create a basic placeholder dict
+        print(f"Unable to convert {type(data)} to dictionary, creating placeholder")
+        return {
+            "id": str(id(data)),
+            "error": f"Unable to convert {type(data)} to proper dictionary",
+            "raw_type": str(type(data))
+        }
     
     def _extract_tender_id(self, tender: Any, default_id: int) -> str:
         """Safely extract tender ID from various data formats."""
@@ -327,15 +378,9 @@ class TenderTrailIntegration:
             table_name = f"{source_name}_tenders"
             try:
                 response = self.supabase.table(table_name).select('*').limit(batch_size).execute()
-                if response.data:
-                    # Parse any string tenders into dictionaries
-                    processed_tenders = []
-                    for tender in response.data:
-                        try:
-                            processed_tenders.append(tender)
-                        except Exception as e:
-                            print(f"Error processing raw tender: {e}")
-                    return processed_tenders
+                if response and response.data:
+                    # Process tenders
+                    return self._process_raw_tenders(response.data)
             except Exception as e:
                 print(f"Table {table_name} not found, trying direct source table {source_name}")
             
@@ -345,7 +390,7 @@ class TenderTrailIntegration:
                 try:
                     response = self.supabase.table(source_name).select('*').eq('processed', False).limit(batch_size).execute()
                     # Mark processed records
-                    if response.data:
+                    if response and response.data:
                         ids = []
                         for item in response.data:
                             if isinstance(item, dict) and 'id' in item:
@@ -354,13 +399,13 @@ class TenderTrailIntegration:
                         if ids:
                             self.supabase.table(source_name).update({'processed': True}).in_('id', ids).execute()
                         
-                        return response.data
+                        return self._process_raw_tenders(response.data)
                 except Exception as e:
                     print(f"Error querying with processed field, trying without: {e}")
                     # Try without processed field
                     response = self.supabase.table(source_name).select('*').limit(batch_size).execute()
-                    if response.data:
-                        return response.data
+                    if response and response.data:
+                        return self._process_raw_tenders(response.data)
             except Exception as e:
                 print(f"Error querying table {source_name}: {e}")
             
@@ -369,6 +414,53 @@ class TenderTrailIntegration:
         except Exception as e:
             print(f"Error getting raw tenders: {e}")
             return []
+    
+    def _process_raw_tenders(self, raw_data: List[Any]) -> List[Dict[str, Any]]:
+        """Process raw tenders data to ensure all items are dictionaries."""
+        processed_tenders = []
+        
+        # Extra debugging to understand the data format
+        sample_item = raw_data[0] if raw_data else None
+        print(f"Sample raw tender type: {type(sample_item)}")
+        
+        # Process each item
+        for item in raw_data:
+            try:
+                # First check if it's a string that needs to be parsed
+                if isinstance(item, str):
+                    try:
+                        parsed_item = json.loads(item)
+                        processed_tenders.append(parsed_item)
+                        continue
+                    except json.JSONDecodeError:
+                        # Not valid JSON, keep as is
+                        pass
+                
+                # If it's a dict, use it directly
+                if isinstance(item, dict):
+                    processed_tenders.append(item)
+                    continue
+                    
+                # If it has a 'data' field that contains the tender
+                if hasattr(item, 'get') and callable(item.get):
+                    if 'data' in item and isinstance(item.get('data'), (dict, str)):
+                        data = item.get('data')
+                        if isinstance(data, str):
+                            try:
+                                data = json.loads(data)
+                            except:
+                                pass
+                        if isinstance(data, dict):
+                            processed_tenders.append(data)
+                            continue
+                
+                # Add the item as-is and let _ensure_dict handle it later
+                processed_tenders.append(item)
+                
+            except Exception as e:
+                print(f"Error processing raw tender item: {e}")
+        
+        return processed_tenders
     
     def _insert_normalized_tenders(self, normalized_tenders: List[Dict[str, Any]]) -> None:
         """Insert normalized tenders into unified table."""
@@ -487,23 +579,53 @@ class TenderTrailIntegration:
             from urllib.parse import urlparse
             
             # Parse Supabase URL to get connection details
-            # Format is typically: https://[project-id].supabase.co
-            parsed_url = urlparse(self.supabase._url)
-            host = parsed_url.netloc.split('.')[0]
-            
-            # Connect directly to PostgreSQL
-            conn = psycopg2.connect(
-                host=f"{host}.supabase.co",
-                database="postgres",
-                user="postgres",
-                password=self.supabase._key
-            )
-            
-            # Execute SQL
-            with conn.cursor() as cur:
-                cur.execute(sql)
-            conn.commit()
-            conn.close()
+            # SyncClient in Docker uses different attribute names
+            try:
+                # Try to get URL from different possible attributes
+                url = None
+                if hasattr(self.supabase, 'url'):
+                    url = self.supabase.url
+                elif hasattr(self.supabase, '_url'):
+                    url = self.supabase._url
+                elif hasattr(self.supabase, 'rest_url'):
+                    url = self.supabase.rest_url
+                
+                if not url:
+                    print("Unable to find URL attribute in Supabase client")
+                    return
+                
+                # Try to get key from different possible attributes
+                key = None
+                if hasattr(self.supabase, 'key'):
+                    key = self.supabase.key
+                elif hasattr(self.supabase, '_key'):
+                    key = self.supabase._key
+                elif hasattr(self.supabase, 'supabase_key'):
+                    key = self.supabase.supabase_key
+                
+                if not key:
+                    print("Unable to find key attribute in Supabase client")
+                    return
+                
+                # Parse URL to get host
+                parsed_url = urlparse(url)
+                host = parsed_url.netloc.split('.')[0]
+                
+                # Connect directly to PostgreSQL
+                conn = psycopg2.connect(
+                    host=f"{host}.supabase.co",
+                    database="postgres",
+                    user="postgres",
+                    password=key
+                )
+                
+                # Execute SQL
+                with conn.cursor() as cur:
+                    cur.execute(sql)
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                print(f"Error connecting to database: {e}")
         except Exception as e:
             print(f"Failed to run SQL directly: {e}")
             
