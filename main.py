@@ -1,5 +1,6 @@
 import os
 import json
+import asyncio
 from apify import Actor
 from tender_normalizer import LLMProviderFactory, TenderNormalizer
 from tender_preprocessor import TenderPreprocessor
@@ -99,4 +100,4 @@ def get_available_sources(supabase):
     return ["adb", "wb", "ungm"]
 
 if __name__ == "__main__":
-    Actor.run(main)
+    asyncio.run(main())
