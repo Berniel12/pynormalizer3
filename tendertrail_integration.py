@@ -61,101 +61,106 @@ class TenderTrailIntegration:
                 # Debug what we're getting
                 print(f"Processing tender type: {type(tender)}, Sample: {str(tender)[:100]}")
                 
-                # Preprocess tender - handle string case specifically before preprocessing
-                if isinstance(tender, str):
-                    # Try to parse as JSON first
-                    try:
-                        parsed_tender = json.loads(tender)
-                        if isinstance(parsed_tender, dict):
-                            tender = parsed_tender
-                        else:
-                            # Create a simple wrapper for non-dict parsed data
-                            tender = {"text": str(parsed_tender), "id": str(processed_count)}
-                    except json.JSONDecodeError:
-                        # Not valid JSON, create a text container
-                        tender = {"text": tender, "id": str(processed_count)}
+                # Try direct normalization first based on source patterns
+                normalized_tender = self._normalize_tender(tender, source_name, processed_count)
                 
-                # If we still don't have a dictionary, create one
-                if not isinstance(tender, dict):
-                    tender = {"data": str(tender), "id": str(processed_count)}
-                
-                # Direct tender data preparation for sources with known structure
-                if source_name == "ungm" and "title" in tender:
-                    # For UNGM, directly map the fields without preprocessing
-                    preprocessed_tender = {
-                        "title": tender.get("title", ""),
-                        "description": tender.get("description", ""),
-                        "published_on": tender.get("published_on", ""),
-                        "deadline_on": tender.get("deadline_on", ""),
-                        "beneficiary_countries": tender.get("beneficiary_countries", ""),
-                        "language": "en",
-                        "id": tender.get("id", processed_count)
-                    }
-                elif source_name == "afdb" and "title" in tender:
-                    # For AFDB, directly map the fields without preprocessing
-                    preprocessed_tender = {
-                        "title": tender.get("title", ""),
-                        "description": tender.get("description", ""),
-                        "publication_date": tender.get("publication_date", ""),
-                        "closing_date": tender.get("closing_date", ""),
-                        "estimated_value": tender.get("estimated_value", ""),
-                        "country": tender.get("country", ""),
-                        "language": "en",
-                        "id": tender.get("id", processed_count)
-                    }
-                elif source_name == "wb" and "title" in tender:
-                    # For WB, directly map the fields without preprocessing
-                    preprocessed_tender = {
-                        "title": tender.get("title", ""),
-                        "description": tender.get("description", ""),
-                        "publication_date": tender.get("publication_date", ""),
-                        "deadline": tender.get("deadline", ""),
-                        "country": tender.get("country", ""),
-                        "contact_organization": tender.get("contact_organization", ""),
-                        "language": "en",
-                        "id": tender.get("id", processed_count)
-                    }
-                elif source_name == "afd" and "notice_title" in tender:
-                    # For AFD, directly map the fields without preprocessing
-                    preprocessed_tender = {
-                        "title": tender.get("notice_title", ""),
-                        "description": tender.get("notice_content", ""),
-                        "publication_date": tender.get("publication_date", ""),
-                        "country": tender.get("country", ""),
-                        "notice_id": tender.get("notice_id", ""),
-                        "language": "fr",
-                        "id": tender.get("id", processed_count)
-                    }
-                else:
-                    # For other sources or if direct mapping failed, try preprocessing
-                    try:
-                        # Now preprocess with the proper dictionary
-                        preprocessed_tender = self.preprocessor.preprocess(tender, source_schema)
-                    except Exception as preprocess_error:
-                        # If preprocessor fails, create a minimal dictionary with available fields
-                        print(f"Preprocessor error: {preprocess_error}. Creating minimal tender dictionary.")
-                        
-                        # Try to extract basic fields that might be in the schema
-                        preprocessed_tender = {}
-                        for field in source_schema:
-                            if field in tender and field != "source_name" and field != "language":
-                                preprocessed_tender[field] = tender[field]
-                        
-                        # Add required metadata
-                        preprocessed_tender["id"] = tender.get("id", processed_count)
-                        preprocessed_tender["language"] = source_schema.get("language", "en")
-                
-                # Normalize tender
-                normalized_tender = self.normalizer.normalize_tender(
-                    preprocessed_tender, source_schema, target_schema
-                )
-                
-                # Add metadata
-                normalized_tender['source'] = source_name
-                # Ensure raw_id is a string
-                raw_id = tender.get('id')
-                normalized_tender['raw_id'] = str(raw_id) if raw_id is not None else str(processed_count)
-                normalized_tender['processed_at'] = self._get_current_timestamp()
+                # If direct normalization wasn't possible, go through standard process
+                if normalized_tender is None:
+                    # Preprocess tender - handle string case specifically before preprocessing
+                    if isinstance(tender, str):
+                        # Try to parse as JSON first
+                        try:
+                            parsed_tender = json.loads(tender)
+                            if isinstance(parsed_tender, dict):
+                                tender = parsed_tender
+                            else:
+                                # Create a simple wrapper for non-dict parsed data
+                                tender = {"text": str(parsed_tender), "id": str(processed_count)}
+                        except json.JSONDecodeError:
+                            # Not valid JSON, create a text container
+                            tender = {"text": tender, "id": str(processed_count)}
+                    
+                    # If we still don't have a dictionary, create one
+                    if not isinstance(tender, dict):
+                        tender = {"data": str(tender), "id": str(processed_count)}
+                    
+                    # Direct tender data preparation for sources with known structure
+                    if source_name == "ungm" and "title" in tender:
+                        # For UNGM, directly map the fields without preprocessing
+                        preprocessed_tender = {
+                            "title": tender.get("title", ""),
+                            "description": tender.get("description", ""),
+                            "published_on": tender.get("published_on", ""),
+                            "deadline_on": tender.get("deadline_on", ""),
+                            "beneficiary_countries": tender.get("beneficiary_countries", ""),
+                            "language": "en",
+                            "id": tender.get("id", processed_count)
+                        }
+                    elif source_name == "afdb" and "title" in tender:
+                        # For AFDB, directly map the fields without preprocessing
+                        preprocessed_tender = {
+                            "title": tender.get("title", ""),
+                            "description": tender.get("description", ""),
+                            "publication_date": tender.get("publication_date", ""),
+                            "closing_date": tender.get("closing_date", ""),
+                            "estimated_value": tender.get("estimated_value", ""),
+                            "country": tender.get("country", ""),
+                            "language": "en",
+                            "id": tender.get("id", processed_count)
+                        }
+                    elif source_name == "wb" and "title" in tender:
+                        # For WB, directly map the fields without preprocessing
+                        preprocessed_tender = {
+                            "title": tender.get("title", ""),
+                            "description": tender.get("description", ""),
+                            "publication_date": tender.get("publication_date", ""),
+                            "deadline": tender.get("deadline", ""),
+                            "country": tender.get("country", ""),
+                            "contact_organization": tender.get("contact_organization", ""),
+                            "language": "en",
+                            "id": tender.get("id", processed_count)
+                        }
+                    elif source_name == "afd" and "notice_title" in tender:
+                        # For AFD, directly map the fields without preprocessing
+                        preprocessed_tender = {
+                            "title": tender.get("notice_title", ""),
+                            "description": tender.get("notice_content", ""),
+                            "publication_date": tender.get("publication_date", ""),
+                            "country": tender.get("country", ""),
+                            "notice_id": tender.get("notice_id", ""),
+                            "language": "fr",
+                            "id": tender.get("id", processed_count)
+                        }
+                    else:
+                        # For other sources or if direct mapping failed, try preprocessing
+                        try:
+                            # Now preprocess with the proper dictionary
+                            preprocessed_tender = self.preprocessor.preprocess(tender, source_schema)
+                        except Exception as preprocess_error:
+                            # If preprocessor fails, create a minimal dictionary with available fields
+                            print(f"Preprocessor error: {preprocess_error}. Creating minimal tender dictionary.")
+                            
+                            # Try to extract basic fields that might be in the schema
+                            preprocessed_tender = {}
+                            for field in source_schema:
+                                if isinstance(field, str) and field in tender and field != "source_name" and field != "language":
+                                    preprocessed_tender[field] = tender[field]
+                            
+                            # Add required metadata
+                            preprocessed_tender["id"] = tender.get("id", processed_count)
+                            preprocessed_tender["language"] = source_schema.get("language", "en")
+                    
+                    # Normalize tender
+                    normalized_tender = self.normalizer.normalize_tender(
+                        preprocessed_tender, source_schema, target_schema
+                    )
+                    
+                    # Add metadata
+                    normalized_tender['source'] = source_name
+                    # Ensure raw_id is a string
+                    raw_id = tender.get('id')
+                    normalized_tender['raw_id'] = str(raw_id) if raw_id is not None else str(processed_count)
+                    normalized_tender['processed_at'] = self._get_current_timestamp()
                 
                 # Add to batch
                 normalized_tenders.append(normalized_tender)
@@ -892,3 +897,61 @@ class TenderTrailIntegration:
             },
             "language": "en"
         }
+
+    def _normalize_tender(self, tender, source_name, processed_count):
+        """Normalize a tender directly based on source format without using preprocessor or normalizer."""
+        try:
+            # Check source type and apply appropriate normalization
+            if source_name == "ungm" and "title" in tender:
+                return {
+                    "title": tender.get("title", ""),
+                    "description": tender.get("description", ""),
+                    "date_published": tender.get("published_on", ""),
+                    "closing_date": tender.get("deadline_on", ""),
+                    "location": tender.get("beneficiary_countries", ""),
+                    "issuing_authority": tender.get("agency", ""),
+                    "source": source_name,
+                    "raw_id": str(tender.get("id", processed_count)),
+                    "processed_at": self._get_current_timestamp()
+                }
+            elif source_name == "afdb" and "title" in tender:
+                return {
+                    "title": tender.get("title", ""),
+                    "description": tender.get("description", ""),
+                    "date_published": tender.get("publication_date", ""),
+                    "closing_date": tender.get("closing_date", ""),
+                    "tender_value": tender.get("estimated_value", ""),
+                    "location": tender.get("country", ""),
+                    "source": source_name,
+                    "raw_id": str(tender.get("id", processed_count)),
+                    "processed_at": self._get_current_timestamp()
+                }
+            elif source_name == "wb" and "title" in tender:
+                return {
+                    "title": tender.get("title", ""),
+                    "description": tender.get("description", ""),
+                    "date_published": tender.get("publication_date", ""),
+                    "closing_date": tender.get("deadline", ""),
+                    "location": tender.get("country", ""),
+                    "issuing_authority": tender.get("contact_organization", ""),
+                    "source": source_name,
+                    "raw_id": str(tender.get("id", processed_count)),
+                    "processed_at": self._get_current_timestamp()
+                }
+            elif source_name == "afd" and "notice_title" in tender:
+                return {
+                    "title": tender.get("notice_title", ""),
+                    "description": tender.get("notice_content", ""),
+                    "date_published": tender.get("publication_date", ""),
+                    "location": tender.get("country", ""),
+                    "issuing_authority": "Agence Française de Développement",
+                    "source": source_name,
+                    "raw_id": str(tender.get("id", processed_count)),
+                    "notice_id": tender.get("notice_id", ""),
+                    "processed_at": self._get_current_timestamp()
+                }
+            else:
+                return None  # Will be handled by standard process
+        except Exception as e:
+            print(f"Error in direct normalization: {e}")
+            return None
