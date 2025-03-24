@@ -532,7 +532,7 @@ class TenderTrailIntegration:
                     "tender_value", "tender_currency", "location", 
                     "issuing_authority", "keywords", "tender_type", 
                     "project_size", "contact_information", "raw_id", 
-                    "notice_id", "processed_at"
+                    "processed_at"
                 ]
                 
                 # Ensure required fields exist
@@ -896,7 +896,6 @@ class TenderTrailIntegration:
                 "issuing_authority": "",
                 "source": source_name,
                 "raw_id": str(processed_count),
-                "notice_id": "",
                 "processed_at": self._get_current_timestamp()
             }
             
@@ -909,9 +908,7 @@ class TenderTrailIntegration:
                     "description": ["description", "notice_content", "tender_description", "opportunity_description", "short_description", "details", "content"],
                     "date_published": ["date_published", "published_date", "publication_date", "published_dt", "dispatch_date", "posted_date", "release_date"],
                     "location": ["location", "country", "countries", "place_of_performance", "beneficiary_countries", "nutscode", "region"],
-                    "issuing_authority": ["issuing_authority", "authority", "agency", "authority_name", "organization", "buyer", "contact_organization"],
-                    "notice_id": ["notice_id", "reference", "reference_number", "publication_number", "solicitation_number", "tender_id"],
-                    "closing_date": ["closing_date", "deadline", "deadline_dt", "response_deadline", "submission_deadline", "end_date"]
+                    "issuing_authority": ["issuing_authority", "authority", "agency", "authority_name", "organization", "buyer", "contact_organization"]
                 }
                 
                 # Try to extract values using the mappings
@@ -921,13 +918,23 @@ class TenderTrailIntegration:
                             normalized_tender[target_field] = tender[source_field]
                             break
                 
+                # Extract closing_date from various possible fields
+                closing_date_fields = ["closing_date", "deadline", "deadline_dt", "response_deadline", "submission_deadline", "end_date"]
+                for field in closing_date_fields:
+                    if field in tender and tender[field]:
+                        normalized_tender["closing_date"] = tender[field]
+                        break
+                
                 # Always make sure raw_id is a string
-                if "id" in tender and tender["id"]:
+                # Use notice_id as raw_id if available
+                if "notice_id" in tender and tender["notice_id"]:
+                    normalized_tender["raw_id"] = str(tender["notice_id"])
+                elif "id" in tender and tender["id"]:
                     normalized_tender["raw_id"] = str(tender["id"])
                 elif "opportunity_id" in tender and tender["opportunity_id"]:
                     normalized_tender["raw_id"] = str(tender["opportunity_id"])
-                elif "notice_id" in tender and tender["notice_id"]:
-                    normalized_tender["raw_id"] = str(tender["notice_id"])
+                elif "reference" in tender and tender["reference"]:
+                    normalized_tender["raw_id"] = str(tender["reference"])
                 
                 # Source-specific handling for special fields
                 if source_name == "ungm":
