@@ -130,39 +130,48 @@ class TenderTrailIntegration:
                     
                     # If direct normalization failed, try the standard process with preprocessor and normalizer
                     if self.preprocessor and self.normalizer:
-                        # Preprocess the tender
-                        preprocessed_tender = self.preprocessor.preprocess_tender(tender)
-                        
-                        # Normalize the preprocessed tender
-                        normalized_tender = self.normalizer.normalize_tender(preprocessed_tender)
-                        
-                        # Add to the list of normalized tenders
-                        normalized_tenders.append(normalized_tender)
-                        processed_count += 1
-                    else:
-                        # If no preprocessor or normalizer, create a minimal record
-                        print("Warning: No preprocessor or normalizer available, creating minimal record")
-                        minimal_tender = {
-                            "notice_id": str(uuid.uuid4()),
-                            "notice_type": "Default",
-                            "notice_title": f"Untitled Tender from {source_name}",
-                            "description": "No preprocessor or normalizer available",
-                            "source": source_name,
-                            "country": "",
-                            "location": "",
-                            "issuing_authority": source_name,
-                            "date_published": None,
-                            "closing_date": None
-                        }
-                        normalized_tenders.append(minimal_tender)
-                        processed_count += 1
+                        # Check if the preprocessor has the required method
+                        if hasattr(self.preprocessor, 'preprocess_tender') and callable(getattr(self.preprocessor, 'preprocess_tender')):
+                            # Preprocess the tender
+                            preprocessed_tender = self.preprocessor.preprocess_tender(tender)
+                            
+                            # Check if the normalizer has the required method
+                            if hasattr(self.normalizer, 'normalize_tender') and callable(getattr(self.normalizer, 'normalize_tender')):
+                                # Normalize the preprocessed tender
+                                normalized_tender = self.normalizer.normalize_tender(preprocessed_tender)
+                                
+                                # Add to the list of normalized tenders
+                                normalized_tenders.append(normalized_tender)
+                                processed_count += 1
+                                continue
+                            else:
+                                print(f"Warning: Normalizer doesn't have normalize_tender method")
+                        else:
+                            print(f"Warning: Preprocessor doesn't have preprocess_tender method")
+                    
+                    # If we reach here, create a minimal record
+                    print("Warning: Creating minimal record as normalization failed")
+                    minimal_tender = {
+                        "notice_id": str(uuid.uuid4()),
+                        "notice_type": "Default",
+                        "notice_title": f"Untitled Tender from {source_name}",
+                        "description": "Normalization failed, creating minimal record",
+                        "source": source_name,
+                        "country": "",
+                        "location": "",
+                        "issuing_authority": str(source_name),
+                        "date_published": None,
+                        "closing_date": None
+                    }
+                    normalized_tenders.append(minimal_tender)
+                    processed_count += 1
                 except Exception as e:
                     error_message = f"Error processing tender from {source_name}: {e}"
                     print(error_message)
                     error_count += 1
                     
                     # Create error record
-                    self._insert_error(source_name, "processing_error", error_message, str(tender) if tender else "")
+                    self._insert_error(str(source_name), "processing_error", error_message, str(tender) if tender else "")
             
             # Insert all normalized tenders into the database
             if normalized_tenders:
@@ -986,6 +995,9 @@ class TenderTrailIntegration:
             if not tender:
                 print(f"Warning: Empty tender received from source {source}")
                 return {}
+            
+            # Convert source to string to handle numeric source names
+            source = str(source)
             
             # Start with a base document that contains all required fields with default values
             normalized = {
