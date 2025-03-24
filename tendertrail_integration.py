@@ -602,89 +602,249 @@ class TenderTrailIntegration:
         
         return processed_tenders
     
-    def _insert_normalized_tenders(self, normalized_tenders: List[Dict[str, Any]]) -> None:
-        """Insert normalized tenders into unified table."""
+    def _insert_normalized_tenders(self, normalized_tenders: List[Dict[str, Any]]) -> int:
+        """Insert normalized tenders into unified table and return count of successful insertions."""
         if not normalized_tenders:
             print("No tenders to insert")
-            return None
+            return 0
         
         try:
             print(f"Preparing to insert {len(normalized_tenders)} tenders")
             
             # Create a copy to avoid modifying the original
             tenders_to_insert = []
+            inserted_count = 0
+            
+            # Field mapping between normalized tender fields and database fields
+            field_mapping = {
+                "notice_title": "title",
+                "notice_type": "tender_type",
+                "issuing_authority": "issuing_authority",
+                "date_published": "date_published",
+                "closing_date": "closing_date",
+                "description": "description",
+                "location": "location",
+                "country": "location",  # Use country as fallback for location
+                "source": "source",
+                "value": "tender_value",
+                "currency": "tender_currency",
+                "email": "contact_information",
+                "cpvs": "keywords",  # Store CPVs as keywords
+                "url": "url",  # Add URL field if exists in db
+                "buyer": "buyer",  # Add buyer field if exists in db
+                "raw_id": "raw_id",
+                "notice_id": "raw_id"  # Use notice_id as fallback for raw_id
+            }
+            
+            # Try to load deep-translator if available
+            translator = None
+            try:
+                from deep_translator import GoogleTranslator
+                translator = GoogleTranslator(source='auto', target='en')
+                print("Translation capability is available")
+            except ImportError:
+                print("deep-translator not found, no translation will be performed")
+                print("Consider installing with: pip install deep-translator")
+            except Exception as e:
+                print(f"Error initializing translator: {e}")
+            
+            # First check if metadata column exists in the table
+            metadata_column_exists = False
+            try:
+                # Try to query with metadata column
+                test_query = """
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = 'unified_tenders' AND column_name = 'metadata';
+                """
+                
+                # Try direct query or RPC
+                try:
+                    response = self.supabase.rpc('exec_sql', {'sql': test_query}).execute()
+                    if response.data and len(response.data) > 0:
+                        metadata_column_exists = True
+                except Exception as direct_e:
+                    print(f"Could not check metadata column: {direct_e}")
+                    
+                if not metadata_column_exists:
+                    # Try alternative method to check if column exists
+                    try:
+                        # Just query a row and check returned columns
+                        response = self.supabase.table('unified_tenders').select('*').limit(1).execute()
+                        if hasattr(response, 'data') and response.data:
+                            row = response.data[0]
+                            if 'metadata' in row:
+                                metadata_column_exists = True
+                                print("Metadata column exists in unified_tenders table")
+                    except Exception as alt_e:
+                        print(f"Alternative metadata column check failed: {alt_e}")
+            except Exception as e:
+                print(f"Error checking metadata column: {e}")
+            
+            # If metadata column doesn't exist, try to add it
+            if not metadata_column_exists:
+                try:
+                    print("Attempting to add metadata column to unified_tenders table")
+                    alter_sql = 'ALTER TABLE unified_tenders ADD COLUMN IF NOT EXISTS metadata JSONB;'
+                    
+                    # Try RPC functions
+                    for function_name in ['exec_sql', 'run_sql', 'execute_sql']:
+                        try:
+                            self.supabase.rpc(function_name, {'sql': alter_sql}).execute()
+                            metadata_column_exists = True
+                            print(f"Successfully added metadata column via '{function_name}'")
+                            break
+                        except Exception as fn_e:
+                            print(f"Function '{function_name}' failed: {fn_e}")
+                    
+                    # If RPC failed, try direct SQL
+                    if not metadata_column_exists:
+                        try:
+                            self._run_sql_directly(alter_sql)
+                            metadata_column_exists = True
+                            print("Added metadata column via direct SQL")
+                        except Exception as direct_e:
+                            print(f"Direct SQL failed: {direct_e}")
+                except Exception as alter_e:
+                    print(f"Failed to add metadata column: {alter_e}")
             
             # Ensure all fields are properly formatted
             for tender in normalized_tenders:
-                cleaned_tender = {}
-                
-                # Required fields for the unified_tenders table 
-                required_fields = {
-                    "title": "Untitled Tender",
-                    "source": "unknown"
-                }
-                
-                # Optional fields that match the database schema 
-                optional_fields = [
-                    "tender_value", "tender_currency", "location", 
-                    "issuing_authority", "keywords", "tender_type", 
-                    "project_size", "contact_information", "raw_id", 
-                    "processed_at"
-                ]
-                
-                # Date fields that need special handling
-                date_fields = ["date_published", "closing_date"]
-                
-                # Text fields that should always be included
-                text_fields = ["description"]
-                
-                # Ensure required fields exist
-                for field, default_value in required_fields.items():
-                    if field in tender and tender[field] is not None and tender[field] != "":
-                        cleaned_tender[field] = str(tender[field])[:1000]  # Truncate long values
-                    else:
-                        cleaned_tender[field] = default_value
-                
-                # Handle text fields
-                for field in text_fields:
-                    if field in tender and tender[field] is not None:
-                        cleaned_tender[field] = str(tender[field])[:2000]  # Truncate long values
-                    else:
-                        cleaned_tender[field] = ""  # Empty string is valid for text fields
-                
-                # Handle date fields - set to NULL (None) if empty or invalid
-                for field in date_fields:
-                    if field in tender and tender[field] and tender[field] != "":
-                        try:
-                            # Try to parse and format the date if it's not already in YYYY-MM-DD format
-                            if isinstance(tender[field], str) and not self._is_valid_date_format(tender[field]):
-                                parsed_date = self._parse_date(tender[field])
-                                if parsed_date:
-                                    cleaned_tender[field] = parsed_date
-                                else:
-                                    cleaned_tender[field] = None  # Set to NULL if can't parse
-                            else:
-                                cleaned_tender[field] = tender[field]
-                        except:
-                            cleaned_tender[field] = None  # Set to NULL on error
-                    else:
-                        cleaned_tender[field] = None  # Set to NULL if empty
-                
-                # Add optional fields if they exist
-                for field in optional_fields:
-                    if field in tender and tender[field] is not None and tender[field] != "" and field not in cleaned_tender:
-                        if isinstance(tender[field], (dict, list)):
-                            # Convert complex objects to JSON string
-                            cleaned_tender[field] = json.dumps(tender[field])[:2000]  # Truncate long JSON
-                        else:
-                            cleaned_tender[field] = str(tender[field])[:2000]  # Truncate long values
-                            
-                # Add processed_at if not present
-                if "processed_at" not in cleaned_tender:
-                    cleaned_tender["processed_at"] = self._get_current_timestamp()
+                try:
+                    cleaned_tender = {}
+                    metadata = {}
                     
-                tenders_to_insert.append(cleaned_tender)
-                
+                    # Extract metadata if present
+                    if "metadata" in tender and tender["metadata"]:
+                        try:
+                            if isinstance(tender["metadata"], str):
+                                metadata = json.loads(tender["metadata"])
+                            elif isinstance(tender["metadata"], dict):
+                                metadata = tender["metadata"]
+                        except Exception as md_e:
+                            print(f"Error parsing metadata: {md_e}")
+                    
+                    # Map fields using the field mapping
+                    for norm_field, db_field in field_mapping.items():
+                        if norm_field in tender and tender[norm_field] is not None and tender[norm_field] != "":
+                            # For text fields, handle translation if needed
+                            if db_field in ["title", "description"] and translator and isinstance(tender[norm_field], str):
+                                # Check if translation is needed (non-English text)
+                                text = tender[norm_field]
+                                needs_translation = False
+                                
+                                # Check for non-ASCII characters that might indicate non-English text
+                                if any(ord(c) > 127 for c in text):
+                                    needs_translation = True
+                                
+                                # Common non-English indicators
+                                non_english_indicators = ['à', 'á', 'â', 'ã', 'ä', 'å', 'æ', 'ç', 'è', 'é', 'ê', 'ë', 
+                                                         'ì', 'í', 'î', 'ï', 'ñ', 'ò', 'ó', 'ô', 'õ', 'ö', 'ø', 'ù', 
+                                                         'ú', 'û', 'ü', 'ý', 'ÿ']
+                                
+                                if any(indicator in text.lower() for indicator in non_english_indicators):
+                                    needs_translation = True
+                                
+                                # Try to translate if needed
+                                if needs_translation:
+                                    try:
+                                        translated_text = translator.translate(text[:5000])  # Limit length for API
+                                        if translated_text and len(translated_text) > 10:  # Sanity check on result
+                                            # Store original in metadata
+                                            metadata[f"original_{norm_field}"] = text
+                                            # Use translated text
+                                            cleaned_tender[db_field] = translated_text[:2000]  # Truncate if needed
+                                            continue
+                                    except Exception as trans_e:
+                                        print(f"Translation error: {trans_e}")
+                            
+                            # Special handling for date fields
+                            if db_field in ["date_published", "closing_date"]:
+                                # Parse date if it's a string
+                                if isinstance(tender[norm_field], str):
+                                    parsed_date = self._parse_date(tender[norm_field])
+                                    if parsed_date:
+                                        # Sanity check on year - if after 2030 or before 2000, probably incorrect
+                                        try:
+                                            year = int(parsed_date.split('-')[0])
+                                            if year > 2030:
+                                                # Adjust year to current year
+                                                import datetime
+                                                current_year = datetime.datetime.now().year
+                                                parts = parsed_date.split('-')
+                                                parsed_date = f"{current_year}-{parts[1]}-{parts[2]}"
+                                        except:
+                                            pass
+                                        
+                                        cleaned_tender[db_field] = parsed_date
+                                    else:
+                                        cleaned_tender[db_field] = None
+                                else:
+                                    cleaned_tender[db_field] = tender[norm_field]
+                                
+                            # Special handling for value field
+                            elif db_field == "tender_value" and tender[norm_field] is not None:
+                                try:
+                                    # Try to convert to float
+                                    if isinstance(tender[norm_field], (int, float)):
+                                        cleaned_tender[db_field] = str(tender[norm_field])
+                                    elif isinstance(tender[norm_field], str):
+                                        # Remove any non-numeric characters except decimal point
+                                        import re
+                                        numeric_str = re.sub(r'[^\d.]', '', tender[norm_field])
+                                        if numeric_str:
+                                            cleaned_tender[db_field] = str(float(numeric_str))
+                                except Exception as val_e:
+                                    print(f"Error parsing value: {val_e}")
+                                    
+                            # Special handling for CPV codes
+                            elif norm_field == "cpvs" and db_field == "keywords":
+                                if isinstance(tender[norm_field], list):
+                                    cleaned_tender[db_field] = ",".join([str(cpv) for cpv in tender[norm_field]])
+                                elif isinstance(tender[norm_field], str):
+                                    cleaned_tender[db_field] = tender[norm_field]
+                                    
+                            # For other text fields, just truncate if needed
+                            elif isinstance(tender[norm_field], str):
+                                cleaned_tender[db_field] = tender[norm_field][:2000]  # Truncate long values
+                            elif isinstance(tender[norm_field], (dict, list)):
+                                # Convert complex objects to JSON string
+                                cleaned_tender[db_field] = json.dumps(tender[norm_field])[:2000]
+                            else:
+                                cleaned_tender[db_field] = str(tender[norm_field])[:2000]
+                    
+                    # Ensure required fields exist with defaults
+                    if "title" not in cleaned_tender or not cleaned_tender["title"]:
+                        cleaned_tender["title"] = f"Untitled Tender from {tender.get('source', 'Unknown')}"
+                        
+                    if "source" not in cleaned_tender or not cleaned_tender["source"]:
+                        cleaned_tender["source"] = "Unknown"
+                        
+                    if "description" not in cleaned_tender or not cleaned_tender["description"]:
+                        # Try to create a description from other fields
+                        description_parts = []
+                        for field in ["notice_type", "location", "country", "issuing_authority"]:
+                            if field in tender and tender[field]:
+                                description_parts.append(f"{field.replace('_', ' ').title()}: {tender[field]}")
+                        
+                        if description_parts:
+                            cleaned_tender["description"] = " | ".join(description_parts)
+                        else:
+                            cleaned_tender["description"] = "No detailed content available"
+                    
+                    # Add processed_at if not present
+                    if "processed_at" not in cleaned_tender:
+                        cleaned_tender["processed_at"] = self._get_current_timestamp()
+                    
+                    # Add metadata column if it exists in the database
+                    if metadata_column_exists and metadata:
+                        cleaned_tender["metadata"] = json.dumps(metadata)
+                    
+                    tenders_to_insert.append(cleaned_tender)
+                except Exception as tender_e:
+                    print(f"Error preparing tender for insertion: {tender_e}")
+                    continue
+            
             # Create unified_tenders table if it doesn't exist
             try:
                 self._create_unified_tenders_table()
@@ -692,7 +852,7 @@ class TenderTrailIntegration:
                 print(f"Error creating unified_tenders table: {e}")
             
             # Insert in batches to avoid timeout issues
-            batch_size = 50
+            batch_size = 20  # Smaller batch size for better error handling
             for i in range(0, len(tenders_to_insert), batch_size):
                 batch = tenders_to_insert[i:i + batch_size]
                 try:
@@ -700,299 +860,29 @@ class TenderTrailIntegration:
                     response = self.supabase.table('unified_tenders').insert(batch).execute()
                     if hasattr(response, 'data'):
                         print(f"Successfully inserted batch with {len(batch)} tenders")
+                        inserted_count += len(batch)
                     else:
                         print(f"Batch insert completed but no data returned")
+                        inserted_count += len(batch)  # Assume success
                 except Exception as batch_error:
                     print(f"Error inserting batch: {batch_error}")
                     # Try to insert one by one
                     print(f"Attempting one-by-one insertion for batch {i//batch_size + 1}")
                     for tender in batch:
                         try:
-                            self.supabase.table('unified_tenders').insert(tender).execute()
+                            response = self.supabase.table('unified_tenders').insert(tender).execute()
+                            if hasattr(response, 'data'):
+                                inserted_count += 1
                         except Exception as single_error:
                             print(f"Error inserting single tender: {single_error}")
             
-            print(f"Completed inserting {len(tenders_to_insert)} tenders")
-            return True
+            print(f"Successfully inserted {inserted_count} out of {len(normalized_tenders)} tenders")
+            return inserted_count
         except Exception as e:
             print(f"Error inserting normalized tenders: {e}")
             print("Data sample that failed:", normalized_tenders[0] if normalized_tenders else "No data")
-            return None
+            return 0
     
-    def _is_valid_date_format(self, date_str):
-        """Check if a date string is in YYYY-MM-DD format."""
-        if not isinstance(date_str, str):
-            return False
-        
-        try:
-            # Try to match YYYY-MM-DD format
-            import re
-            return re.match(r'^\d{4}-\d{2}-\d{2}$', date_str) is not None
-        except:
-            return False
-    
-    def _parse_date(self, date_str):
-        """Try to parse a date string into YYYY-MM-DD format."""
-        if not date_str or not isinstance(date_str, str):
-            return None
-        
-        # Common date formats to try
-        try:
-            from dateutil import parser
-            parsed_date = parser.parse(date_str)
-            return parsed_date.strftime('%Y-%m-%d')
-        except:
-            try:
-                # Try common formats
-                import datetime
-                formats = [
-                    '%Y-%m-%d', '%m/%d/%Y', '%d/%m/%Y', '%d-%m-%Y', '%Y/%m/%d',
-                    '%b %d, %Y', '%d %b %Y', '%B %d, %Y', '%d %B %Y'
-                ]
-                
-                for fmt in formats:
-                    try:
-                        return datetime.datetime.strptime(date_str, fmt).strftime('%Y-%m-%d')
-                    except:
-                        continue
-                    
-                # If nothing works, return None
-                return None
-            except:
-                return None
-    
-    def _create_unified_tenders_table(self):
-        """Create unified_tenders table if it doesn't exist."""
-        try:
-            # Check if table already exists using simple query
-            try:
-                try:
-                    # Try direct query
-                    response = self.supabase.table('unified_tenders').select('id').limit(1).execute()
-                    if hasattr(response, 'data'):
-                        print("unified_tenders table already exists")
-                        return
-                except Exception as e:
-                    # If the error indicates the table doesn't exist, try to create it
-                    if "relation" in str(e) and "does not exist" in str(e):
-                        print(f"unified_tenders table doesn't exist, creating it: {e}")
-                    else:
-                        print(f"unified_tenders table check failed: {e}")
-                
-                # Create table using RPC if available
-                create_table_sql = """
-                CREATE TABLE IF NOT EXISTS public.unified_tenders (
-                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    title TEXT NOT NULL,
-                    description TEXT,
-                    date_published DATE,
-                    closing_date DATE,
-                    tender_value TEXT,
-                    tender_currency TEXT,
-                    location TEXT,
-                    issuing_authority TEXT,
-                    keywords TEXT,
-                    tender_type TEXT,
-                    project_size TEXT,
-                    contact_information TEXT,
-                    source TEXT NOT NULL,
-                    raw_id TEXT,
-                    processed_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
-                )
-                """
-                
-                # Try to execute the create table via other functions if available
-                for function_name in ['exec_sql', 'run_sql', 'execute_sql']:
-                    try:
-                        print(f"Attempting to create unified_tenders table via '{function_name}' RPC")
-                        self.supabase.rpc(function_name, {'sql': create_table_sql}).execute()
-                        print(f"Successfully created unified_tenders table via '{function_name}'")
-                        return
-                    except Exception as fn_e:
-                        print(f"Function '{function_name}' failed: {fn_e}")
-                
-                # If we get here, table creation methods failed but we'll continue
-                print("Could not create unified_tenders table via RPC, will try insert anyway")
-            except Exception as check_e:
-                print(f"Error checking unified_tenders table: {check_e}")
-        except Exception as general_e:
-            print(f"General error in _create_unified_tenders_table: {general_e}")
-            print("Continuing without table creation")
-    
-    def _log_errors(self, errors: List[Dict[str, Any]]) -> None:
-        """Log processing errors to database."""
-        if not errors:
-            print("No errors to log")
-            return None
-            
-        try:
-            print(f"Preparing to log {len(errors)} errors")
-            
-            # Skip table creation to avoid hanging
-            # self._create_errors_table()
-            
-            # Truncate very long error messages to avoid DB issues
-            for error in errors:
-                if 'error' in error and isinstance(error['error'], str) and len(error['error']) > 1000:
-                    error['error'] = error['error'][:997] + '...'
-                
-            try:    
-                print("Inserting errors into normalization_errors table")
-                response = self.supabase.table('normalization_errors').insert(errors).execute()
-                print(f"Successfully logged {len(errors)} errors")
-                return response.data
-            except Exception as e:
-                print(f"Failed to log errors to database: {e}")
-                # Print the first few errors to console as fallback
-                print("Sample errors:")
-                for i, error in enumerate(errors[:5]):
-                    print(f"  Error {i+1}: {error.get('tender_id', 'unknown')} - {error.get('error', 'unknown')}")
-                return None
-        except Exception as e:
-            print(f"Error logging errors: {e}")
-            return None
-    
-    def _create_errors_table(self):
-        """Create normalization_errors table if it doesn't exist."""
-        try:
-            # Check if table already exists using simple query
-            try:
-                try:
-                    # Try direct query
-                    response = self.supabase.table('normalization_errors').select('id').limit(1).execute()
-                    if hasattr(response, 'data'):
-                        print("normalization_errors table already exists")
-                        return
-                except Exception as e:
-                    # If the error indicates the table doesn't exist, try to create it
-                    if "relation" in str(e) and "does not exist" in str(e):
-                        print(f"normalization_errors table doesn't exist, creating it: {e}")
-                    else:
-                        print(f"normalization_errors table check failed: {e}")
-                
-                # Create table using RPC if available
-                create_table_sql = """
-                CREATE TABLE IF NOT EXISTS public.normalization_errors (
-                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    tender_id TEXT,
-                    error TEXT,
-                    source TEXT,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
-                )
-                """
-                
-                # Try to execute the create table via other functions if available
-                for function_name in ['exec_sql', 'run_sql', 'execute_sql']:
-                    try:
-                        print(f"Attempting to create normalization_errors table via '{function_name}' RPC")
-                        self.supabase.rpc(function_name, {'sql': create_table_sql}).execute()
-                        print(f"Successfully created normalization_errors table via '{function_name}'")
-                        return
-                    except Exception as fn_e:
-                        print(f"Function '{function_name}' failed: {fn_e}")
-                
-                # If we get here, table creation methods failed but we'll continue
-                print("Could not create normalization_errors table via RPC, will try insert anyway")
-            except Exception as check_e:
-                print(f"Error checking normalization_errors table: {check_e}")
-        except Exception as general_e:
-            print(f"General error in _create_errors_table: {general_e}")
-            print("Continuing without table creation")
-    
-    def _get_current_timestamp(self) -> str:
-        """Get current timestamp in ISO format."""
-        from datetime import datetime
-        return datetime.utcnow().isoformat()
-    
-    def _run_sql_directly(self, sql: str) -> None:
-        """Run SQL directly using psycopg2 connection if available."""
-        try:
-            # This is a fallback method if RPC is not available
-            # It will attempt to use psycopg2 directly if available
-            try:
-                import psycopg2
-            except ImportError:
-                print("Installing psycopg2-binary...")
-                try:
-                    subprocess.check_call([sys.executable, "-m", "pip", "install", "psycopg2-binary"])
-                    import psycopg2
-                    print("psycopg2-binary installed successfully")
-                except Exception as e:
-                    print(f"Failed to install psycopg2-binary: {e}")
-                    return
-                
-            from urllib.parse import urlparse
-            
-            # Parse Supabase URL to get connection details
-            # SyncClient in Docker uses different attribute names
-            try:
-                # Try to get URL from different possible attributes
-                url = None
-                if hasattr(self.supabase, 'url'):
-                    url = self.supabase.url
-                elif hasattr(self.supabase, '_url'):
-                    url = self.supabase._url
-                elif hasattr(self.supabase, 'rest_url'):
-                    url = self.supabase.rest_url
-                
-                if not url:
-                    print("Unable to find URL attribute in Supabase client, skipping direct SQL execution")
-                    return
-                
-                # Try to get key from different possible attributes
-                key = None
-                if hasattr(self.supabase, 'key'):
-                    key = self.supabase.key
-                elif hasattr(self.supabase, '_key'):
-                    key = self.supabase._key
-                elif hasattr(self.supabase, 'supabase_key'):
-                    key = self.supabase.supabase_key
-                
-                if not key:
-                    print("Unable to find key attribute in Supabase client, skipping direct SQL execution")
-                    return
-                
-                # Parse URL to get host
-                parsed_url = urlparse(url)
-                
-                # Check if the URL is valid
-                if not parsed_url.netloc:
-                    print(f"Invalid Supabase URL format: {url}, skipping direct SQL execution")
-                    return
-                
-                host_parts = parsed_url.netloc.split('.')
-                if len(host_parts) < 2:
-                    print(f"Cannot extract project ID from URL: {url}, skipping direct SQL execution")
-                    return
-                
-                host = host_parts[0]
-                
-                # Connect directly to PostgreSQL with timeout
-                print(f"Attempting direct database connection to {host}.supabase.co")
-                
-                # Add connection timeout to prevent hanging
-                conn = psycopg2.connect(
-                    host=f"{host}.supabase.co",
-                    database="postgres",
-                    user="postgres",
-                    password=key,
-                    connect_timeout=10  # 10 second timeout
-                )
-                
-                # Execute SQL
-                with conn.cursor() as cur:
-                    cur.execute(sql)
-                conn.commit()
-                conn.close()
-                print(f"Successfully executed SQL directly")
-            except Exception as e:
-                print(f"Error connecting to database: {e}")
-                print("Continuing without table creation")
-        except Exception as e:
-            print(f"Failed to run SQL directly: {e}")
-            print("Continuing without table creation")
-            
     def _get_default_target_schema(self) -> Dict[str, Any]:
         """Get default target schema."""
         return {
@@ -1604,3 +1494,373 @@ class TenderTrailIntegration:
         except Exception as e:
             print(f"Error in _create_exec_sql_function: {e}")
             return False
+
+    def _create_unified_tenders_table(self) -> None:
+        """Create unified_tenders table if it doesn't exist with all required columns."""
+        try:
+            # Check if table already exists
+            table_exists = False
+            try:
+                # Try direct query to see if table exists
+                response = self.supabase.table('unified_tenders').select('id').limit(1).execute()
+                if hasattr(response, 'data'):
+                    table_exists = True
+                    print("unified_tenders table already exists")
+                    return
+            except Exception as e:
+                if "relation" in str(e) and "does not exist" in str(e):
+                    print("unified_tenders table doesn't exist, will try to create it")
+                else:
+                    print(f"Error checking unified_tenders table: {e}")
+            
+            if table_exists:
+                return
+            
+            # Table doesn't exist, try to create it
+            # Define SQL to create table with all required columns
+            create_table_sql = """
+            CREATE TABLE IF NOT EXISTS public.unified_tenders (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                title TEXT,
+                description TEXT,
+                date_published DATE,
+                closing_date DATE,
+                tender_type TEXT,
+                tender_value TEXT,
+                tender_currency TEXT,
+                location TEXT,
+                issuing_authority TEXT,
+                keywords TEXT,
+                contact_information TEXT,
+                source TEXT,
+                url TEXT,
+                buyer TEXT,
+                raw_id TEXT,
+                processed_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+                metadata JSONB,
+                CONSTRAINT unified_tenders_source_raw_id_unique UNIQUE (source, raw_id)
+            );
+            """
+            
+            # Also create index for source for faster querying
+            create_index_sql = """
+            CREATE INDEX IF NOT EXISTS unified_tenders_source_idx ON public.unified_tenders (source);
+            """
+            
+            # Try to execute via RPC functions
+            for function_name in ['exec_sql', 'run_sql', 'execute_sql']:
+                try:
+                    print(f"Attempting to create table via '{function_name}' RPC")
+                    self.supabase.rpc(function_name, {'sql': create_table_sql}).execute()
+                    print(f"Successfully created table via '{function_name}'")
+                    
+                    # Create index
+                    try:
+                        self.supabase.rpc(function_name, {'sql': create_index_sql}).execute()
+                        print(f"Successfully created index via '{function_name}'")
+                    except Exception as idx_e:
+                        print(f"Error creating index: {idx_e}")
+                    
+                    return
+                except Exception as fn_e:
+                    print(f"Function '{function_name}' failed: {fn_e}")
+            
+            # Try direct SQL via psycopg2 connection
+            try:
+                self._run_sql_directly(create_table_sql)
+                print("Created unified_tenders table via direct SQL")
+                
+                # Create index
+                try:
+                    self._run_sql_directly(create_index_sql)
+                    print("Created index via direct SQL")
+                except Exception as idx_e:
+                    print(f"Error creating index: {idx_e}")
+                
+                return
+            except Exception as direct_e:
+                print(f"Direct SQL failed: {direct_e}")
+            
+            print("Failed to create unified_tenders table, operations may fail")
+        except Exception as e:
+            print(f"Error in _create_unified_tenders_table: {e}")
+
+    def _run_sql_directly(self, sql):
+        """Run SQL directly via psycopg2 connection."""
+        try:
+            # Try to use URL and key from supabase client to connect
+            from urllib.parse import urlparse
+            import psycopg2
+            
+            # Try to extract URL from client
+            url = None
+            if hasattr(self.supabase, 'url'):
+                url = self.supabase.url
+            elif hasattr(self.supabase, '_url'):
+                url = self.supabase._url
+            elif hasattr(self.supabase, 'rest_url'):
+                url = self.supabase.rest_url
+                
+            # Try to extract key from client
+            key = None
+            if hasattr(self.supabase, 'key'):
+                key = self.supabase.key
+            elif hasattr(self.supabase, '_key'):
+                key = self.supabase._key
+            elif hasattr(self.supabase, 'supabase_key'):
+                key = self.supabase.supabase_key
+                
+            if not url or not key:
+                raise ValueError("Could not extract URL and key from Supabase client")
+                
+            # Get the host from the URL
+            parsed_url = urlparse(url)
+            if not parsed_url.netloc:
+                raise ValueError(f"Invalid URL format: {url}")
+                
+            # Extract project ID from host 
+            host_parts = parsed_url.netloc.split('.')
+            if len(host_parts) < 2:
+                raise ValueError(f"Could not parse host from URL: {url}")
+                
+            project_id = host_parts[0]
+            
+            # Connect to the database using psycopg2
+            conn_string = f"postgresql://postgres:{key}@{project_id}.supabase.co:5432/postgres"
+            
+            print(f"Connecting to {project_id}.supabase.co")
+            conn = psycopg2.connect(conn_string, connect_timeout=10)
+            cursor = conn.cursor()
+            
+            # Execute the SQL
+            cursor.execute(sql)
+            conn.commit()
+            cursor.close()
+            conn.close()
+            return True
+        except Exception as e:
+            print(f"Error running SQL directly: {e}")
+            raise
+
+    def _create_errors_table(self) -> None:
+        """Create normalization_errors table if it doesn't exist."""
+        try:
+            # Check if table already exists
+            table_exists = False
+            try:
+                # Try direct query to see if table exists
+                test_query = """
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = 'public'
+                    AND table_name = 'normalization_errors'
+                );
+                """
+                
+                # Try with exec_sql
+                try:
+                    response = self.supabase.rpc('exec_sql', {'sql': test_query}).execute()
+                    if response.data and response.data[0] and response.data[0].get('exists'):
+                        table_exists = True
+                        print("normalization_errors table already exists")
+                        return
+                except Exception as e:
+                    # Try direct query
+                    try:
+                        response = self.supabase.table('normalization_errors').select('id').limit(1).execute()
+                        if hasattr(response, 'data'):
+                            table_exists = True
+                            print("normalization_errors table already exists")
+                            return
+                    except Exception as e2:
+                        if "relation" in str(e2) and "does not exist" in str(e2):
+                            print("normalization_errors table doesn't exist, will try to create it")
+                        else:
+                            print(f"Error checking normalization_errors table: {e2}")
+            except Exception as e:
+                print(f"Error checking if normalization_errors table exists: {e}")
+            
+            if table_exists:
+                return
+            
+            # Table doesn't exist, try to create it
+            create_table_sql = """
+            CREATE TABLE IF NOT EXISTS public.normalization_errors (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                source TEXT NOT NULL,
+                error_type TEXT NOT NULL,
+                error_message TEXT NOT NULL,
+                tender_data TEXT,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+            );
+            """
+            
+            # Try to execute via RPC functions
+            for function_name in ['exec_sql', 'run_sql', 'execute_sql']:
+                try:
+                    print(f"Attempting to create normalization_errors table via '{function_name}' RPC")
+                    self.supabase.rpc(function_name, {'sql': create_table_sql}).execute()
+                    print(f"Successfully created normalization_errors table via '{function_name}'")
+                    return
+                except Exception as fn_e:
+                    print(f"Function '{function_name}' failed: {fn_e}")
+            
+            # Try direct SQL via psycopg2 connection
+            try:
+                self._run_sql_directly(create_table_sql)
+                print("Created normalization_errors table via direct SQL")
+                return
+            except Exception as direct_e:
+                print(f"Direct SQL failed: {direct_e}")
+            
+            print("Failed to create normalization_errors table, error tracking may not work")
+        except Exception as e:
+            print(f"Error in _create_errors_table: {e}")
+
+    def _insert_error(self, source: str, error_type: str, error_message: str, tender_data: str = "") -> None:
+        """Insert an error record into the normalization_errors table."""
+        try:
+            # Ensure table exists
+            self._create_errors_table()
+            
+            # Truncate tender_data if it's too long
+            if tender_data and len(tender_data) > 10000:
+                tender_data = tender_data[:10000] + "... [truncated]"
+            
+            # Insert error record
+            error_record = {
+                'source': source,
+                'error_type': error_type,
+                'error_message': error_message[:2000],  # Truncate if needed
+                'tender_data': tender_data
+            }
+            
+            try:
+                self.supabase.table('normalization_errors').insert(error_record).execute()
+                print(f"Inserted error record for {source}: {error_type}")
+            except Exception as e:
+                print(f"Failed to insert error record: {e}")
+                
+                # Try to add via SQL if table insert fails
+                try:
+                    # Escape values for SQL
+                    source_esc = source.replace("'", "''")
+                    error_type_esc = error_type.replace("'", "''")
+                    error_message_esc = error_message[:2000].replace("'", "''")
+                    tender_data_esc = tender_data.replace("'", "''")
+                    
+                    insert_sql = f"""
+                    INSERT INTO public.normalization_errors (source, error_type, error_message, tender_data)
+                    VALUES ('{source_esc}', '{error_type_esc}', '{error_message_esc}', '{tender_data_esc}');
+                    """
+                    
+                    # Try to use RPC function
+                    for function_name in ['exec_sql', 'run_sql', 'execute_sql']:
+                        try:
+                            self.supabase.rpc(function_name, {'sql': insert_sql}).execute()
+                            print(f"Inserted error record via {function_name}")
+                            return
+                        except Exception as fn_e:
+                            print(f"Function '{function_name}' failed for error insert: {fn_e}")
+                    
+                    # Try direct SQL
+                    self._run_sql_directly(insert_sql)
+                    print("Inserted error record via direct SQL")
+                except Exception as sql_e:
+                    print(f"Failed to insert error record via SQL: {sql_e}")
+        except Exception as e:
+            print(f"Error in _insert_error: {e}")
+
+    def _parse_date(self, date_str):
+        """Parse a date string into ISO format (YYYY-MM-DD)."""
+        if not date_str:
+            return None
+        
+        if isinstance(date_str, (int, float)):
+            # Unix timestamp
+            import datetime
+            try:
+                return datetime.datetime.fromtimestamp(date_str).strftime('%Y-%m-%d')
+            except:
+                return None
+        
+        # If already ISO format, return as is
+        if isinstance(date_str, str) and len(date_str) == 10 and date_str[4] == '-' and date_str[7] == '-':
+            return date_str
+        
+        # Try to parse with dateutil
+        try:
+            from dateutil import parser
+            parsed_date = parser.parse(date_str)
+            return parsed_date.strftime('%Y-%m-%d')
+        except ImportError:
+            print("dateutil not installed, using basic date parsing")
+        except Exception as e:
+            print(f"Error parsing date with dateutil: {e}")
+        
+        # Fallback to basic parsing
+        try:
+            # Try common formats
+            import datetime
+            
+            # List of common date formats to try
+            formats = [
+                '%Y-%m-%d', '%d-%m-%Y', '%m-%d-%Y',
+                '%Y/%m/%d', '%d/%m/%Y', '%m/%d/%Y',
+                '%d.%m.%Y', '%m.%d.%Y', '%Y.%m.%d',
+                '%b %d, %Y', '%B %d, %Y', '%d %b %Y', '%d %B %Y',
+                '%Y-%m-%dT%H:%M:%S', '%Y-%m-%dT%H:%M:%SZ',
+                '%a, %d %b %Y %H:%M:%S %Z'
+            ]
+            
+            for fmt in formats:
+                try:
+                    parsed_date = datetime.datetime.strptime(date_str, fmt)
+                    return parsed_date.strftime('%Y-%m-%d')
+                except:
+                    continue
+            
+            # If none of the formats worked, try to extract date with regex
+            import re
+            
+            # Pattern for YYYY-MM-DD or similar
+            iso_pattern = r'(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})'
+            iso_match = re.search(iso_pattern, date_str)
+            if iso_match:
+                year, month, day = iso_match.groups()
+                return f"{year}-{int(month):02d}-{int(day):02d}"
+            
+            # Pattern for DD-MM-YYYY or similar
+            dmy_pattern = r'(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})'
+            dmy_match = re.search(dmy_pattern, date_str)
+            if dmy_match:
+                day, month, year = dmy_match.groups()
+                return f"{year}-{int(month):02d}-{int(day):02d}"
+            
+            # If all else fails, return None
+            return None
+        except Exception as e:
+            print(f"Error in basic date parsing: {e}")
+            return None
+
+    def _is_valid_date_format(self, date_str):
+        """Check if a date string is in valid ISO format."""
+        if not date_str:
+            return False
+        
+        # Check basic ISO format (YYYY-MM-DD)
+        if isinstance(date_str, str) and len(date_str) == 10 and date_str[4] == '-' and date_str[7] == '-':
+            try:
+                year, month, day = date_str.split('-')
+                # Check valid ranges
+                if 1900 <= int(year) <= 2100 and 1 <= int(month) <= 12 and 1 <= int(day) <= 31:
+                    return True
+            except:
+                pass
+        
+        return False
+
+    def _get_current_timestamp(self):
+        """Get current timestamp in ISO format."""
+        import datetime
+        return datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ')
