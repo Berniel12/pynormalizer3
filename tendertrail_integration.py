@@ -973,7 +973,17 @@ class TenderTrailIntegration:
             
             # Convert source to string and extract actual source name
             source = str(source)
-            actual_source = source
+            # If source is numeric, use the original source name from the tender if available
+            if source.isdigit():
+                if isinstance(tender, dict) and 'source' in tender:
+                    source = tender['source']
+                elif isinstance(tender, str):
+                    try:
+                        parsed = json.loads(tender)
+                        if isinstance(parsed, dict) and 'source' in parsed:
+                            source = parsed['source']
+                    except:
+                        pass
             
             # Handle string tender by trying to parse it as JSON
             original_tender = tender
@@ -983,9 +993,6 @@ class TenderTrailIntegration:
                     parsed_tender = json.loads(tender)
                     if isinstance(parsed_tender, dict):
                         tender = parsed_tender
-                        # Try to get source from parsed tender
-                        if 'source' in tender:
-                            actual_source = tender['source']
                     else:
                         # If it parsed but not into a dict, try to extract meaningful content
                         print(f"Warning: Tender from {source} is a string that parsed to {type(parsed_tender)}, attempting to extract content")
@@ -993,28 +1000,41 @@ class TenderTrailIntegration:
                 except json.JSONDecodeError:
                     # Not valid JSON, try to extract meaningful content
                     print(f"Warning: Tender from {source} is a string but not valid JSON, attempting to extract content")
-                    tender = self._extract_tender_data(original_tender, source)
-                except Exception as e:
-                    print(f"Error parsing tender string: {e}")
-                    tender = self._extract_tender_data(original_tender, source)
+                    # Create a basic tender structure from the string content
+                    tender = {
+                        'title': f"Tender from {source}",
+                        'description': original_tender if len(original_tender) < 2000 else original_tender[:2000],
+                        'source': source,
+                        'content': original_tender
+                    }
             
             # If tender is still a string after extraction attempts, create a minimal wrapper
             if isinstance(tender, str):
-                tender = {"content": tender, "source": actual_source}
+                tender = {
+                    'title': f"Tender from {source}",
+                    'description': tender if len(tender) < 2000 else tender[:2000],
+                    'source': source,
+                    'content': tender
+                }
             
             # Ensure tender is a dictionary
             if not isinstance(tender, dict):
-                tender = {"content": str(tender), "source": actual_source}
+                tender = {
+                    'title': f"Tender from {source}",
+                    'description': str(tender) if len(str(tender)) < 2000 else str(tender)[:2000],
+                    'source': source,
+                    'content': str(tender)
+                }
             
             # Start with a base document that contains all required fields with default values
             normalized = {
                 "notice_id": tender.get('notice_id', str(uuid.uuid4())),
                 "notice_type": tender.get('type', tender.get('notice_type', 'Default')),
-                "notice_title": tender.get('title', tender.get('name', '')),
-                "description": tender.get('description', tender.get('details', tender.get('summary', ''))),
+                "notice_title": tender.get('title', tender.get('name', f"Tender from {source}")),
+                "description": tender.get('description', tender.get('details', tender.get('summary', tender.get('content', '')))),
                 "country": tender.get('country', tender.get('nation', '')),
-                "location": tender.get('location', tender.get('place', '')),
-                "issuing_authority": tender.get('issuing_authority', tender.get('authority', tender.get('agency', actual_source))),
+                "location": tender.get('location', tender.get('place', tender.get('country', ''))),
+                "issuing_authority": tender.get('issuing_authority', tender.get('authority', tender.get('agency', source))),
                 "date_published": self._parse_date(tender.get('date_published', tender.get('published_date', tender.get('publication_date', '')))) if any(tender.get(f) for f in ['date_published', 'published_date', 'publication_date']) else None,
                 "closing_date": self._parse_date(tender.get('closing_date', tender.get('deadline', tender.get('response_deadline', '')))) if any(tender.get(f) for f in ['closing_date', 'deadline', 'response_deadline']) else None,
                 "currency": tender.get('currency', ''),
@@ -1022,7 +1042,7 @@ class TenderTrailIntegration:
                 "cpvs": tender.get('cpvs', []) if isinstance(tender.get('cpvs'), list) else [tender.get('cpvs')] if tender.get('cpvs') else [],
                 "buyer": tender.get('buyer', tender.get('contracting_authority_name', '')),
                 "email": tender.get('email', tender.get('contact_email', '')),
-                "source": actual_source,
+                "source": source,
                 "url": tender.get('url', tender.get('link', tender.get('tender_url', ''))),
                 "tag": tender.get('tag', tender.get('tags', tender.get('categories', []))),
                 "language": tender.get('language', tender.get('lang', 'en'))
@@ -1044,28 +1064,32 @@ class TenderTrailIntegration:
                 if normalized['location']:
                     title_parts.append(f"in {normalized['location']}")
                 
-                normalized['notice_title'] = " ".join(title_parts) if title_parts else "Untitled Tender"
+                normalized['notice_title'] = " ".join(title_parts) if title_parts else f"Tender from {source}"
             
             if not normalized['description']:
-                # Generate description from available fields
-                desc_parts = []
-                for field, label in [
-                    ('notice_type', 'Type'),
-                    ('issuing_authority', 'Authority'),
-                    ('location', 'Location'),
-                    ('country', 'Country'),
-                    ('value', 'Value'),
-                    ('currency', 'Currency')
-                ]:
-                    if normalized[field]:
-                        desc_parts.append(f"{label}: {normalized[field]}")
-                
-                normalized['description'] = " | ".join(desc_parts) if desc_parts else "No detailed description available"
+                # If we have the original content, use that as the description
+                if isinstance(tender, dict) and 'content' in tender:
+                    normalized['description'] = tender['content'][:2000]
+                else:
+                    # Generate description from available fields
+                    desc_parts = []
+                    for field, label in [
+                        ('notice_type', 'Type'),
+                        ('issuing_authority', 'Authority'),
+                        ('location', 'Location'),
+                        ('country', 'Country'),
+                        ('value', 'Value'),
+                        ('currency', 'Currency')
+                    ]:
+                        if normalized[field]:
+                            desc_parts.append(f"{label}: {normalized[field]}")
+                    
+                    normalized['description'] = " | ".join(desc_parts) if desc_parts else "No detailed description available"
             
             # Include any additional fields as metadata
             metadata = {}
             for k, v in tender.items():
-                if k not in normalized and v is not None:
+                if k not in normalized and v is not None and str(v).strip():
                     metadata[k] = str(v) if not isinstance(v, (str, int, float, bool, type(None))) else v
             
             # If we have metadata, add it to the normalized tender
