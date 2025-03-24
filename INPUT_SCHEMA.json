@@ -6,8 +6,15 @@
     "sourceName": {
       "title": "Source Name",
       "type": "string",
-      "description": "Name of the tender source to process (e.g., 'adb', 'wb', 'ungm')",
+      "description": "Name of the tender source to process (e.g., 'adb', 'wb', 'ungm'). Leave empty to process all sources.",
       "editor": "textfield"
+    },
+    "processAllSources": {
+      "title": "Process All Sources",
+      "type": "boolean",
+      "description": "If set to true, all available sources will be processed",
+      "default": true,
+      "editor": "checkbox"
     },
     "openaiApiKey": {
       "title": "OpenAI API Key",
@@ -39,5 +46,5 @@
       "editor": "number"
     }
   },
-  "required": ["sourceName"]
+  "required": ["openaiApiKey", "supabaseUrl", "supabaseKey"]
 }
