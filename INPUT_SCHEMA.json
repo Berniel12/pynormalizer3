@@ -1,0 +1,43 @@
+{
+  "title": "TenderTrail Normalizer Input",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "sourceName": {
+      "title": "Source Name",
+      "type": "string",
+      "description": "Name of the tender source to process (e.g., 'adb', 'wb', 'ungm')",
+      "editor": "textfield"
+    },
+    "openaiApiKey": {
+      "title": "OpenAI API Key",
+      "type": "string",
+      "description": "Your OpenAI API key for GPT-4o mini access",
+      "editor": "textfield",
+      "isSecret": true
+    },
+    "supabaseUrl": {
+      "title": "Supabase URL",
+      "type": "string",
+      "description": "URL of your Supabase instance",
+      "editor": "textfield"
+    },
+    "supabaseKey": {
+      "title": "Supabase Key",
+      "type": "string",
+      "description": "API key for your Supabase instance",
+      "editor": "textfield",
+      "isSecret": true
+    },
+    "batchSize": {
+      "title": "Batch Size",
+      "type": "integer",
+      "description": "Number of tenders to process in each batch",
+      "default": 100,
+      "minimum": 1,
+      "maximum": 1000,
+      "editor": "number"
+    }
+  },
+  "required": ["sourceName"]
+}
