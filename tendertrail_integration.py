@@ -78,9 +78,61 @@ class TenderTrailIntegration:
                 # If we still don't have a dictionary, create one
                 if not isinstance(tender, dict):
                     tender = {"data": str(tender), "id": str(processed_count)}
-                    
-                # Now preprocess with the proper dictionary
-                preprocessed_tender = self.preprocessor.preprocess(tender, source_schema)
+                
+                # Direct tender data preparation for sources with known structure
+                if source_name == "ungm" and "title" in tender:
+                    # For UNGM, directly map the fields without preprocessing
+                    preprocessed_tender = {
+                        "title": tender.get("title", ""),
+                        "description": tender.get("description", ""),
+                        "published_on": tender.get("published_on", ""),
+                        "deadline_on": tender.get("deadline_on", ""),
+                        "beneficiary_countries": tender.get("beneficiary_countries", ""),
+                        "language": "en",
+                        "id": tender.get("id", processed_count)
+                    }
+                elif source_name == "afdb" and "title" in tender:
+                    # For AFDB, directly map the fields without preprocessing
+                    preprocessed_tender = {
+                        "title": tender.get("title", ""),
+                        "description": tender.get("description", ""),
+                        "publication_date": tender.get("publication_date", ""),
+                        "closing_date": tender.get("closing_date", ""),
+                        "estimated_value": tender.get("estimated_value", ""),
+                        "country": tender.get("country", ""),
+                        "language": "en",
+                        "id": tender.get("id", processed_count)
+                    }
+                elif source_name == "wb" and "title" in tender:
+                    # For WB, directly map the fields without preprocessing
+                    preprocessed_tender = {
+                        "title": tender.get("title", ""),
+                        "description": tender.get("description", ""),
+                        "publication_date": tender.get("publication_date", ""),
+                        "deadline": tender.get("deadline", ""),
+                        "country": tender.get("country", ""),
+                        "contact_organization": tender.get("contact_organization", ""),
+                        "language": "en",
+                        "id": tender.get("id", processed_count)
+                    }
+                else:
+                    # For other sources or if direct mapping failed, try preprocessing
+                    try:
+                        # Now preprocess with the proper dictionary
+                        preprocessed_tender = self.preprocessor.preprocess(tender, source_schema)
+                    except Exception as preprocess_error:
+                        # If preprocessor fails, create a minimal dictionary with available fields
+                        print(f"Preprocessor error: {preprocess_error}. Creating minimal tender dictionary.")
+                        
+                        # Try to extract basic fields that might be in the schema
+                        preprocessed_tender = {}
+                        for field in source_schema:
+                            if field in tender and field != "source_name" and field != "language":
+                                preprocessed_tender[field] = tender[field]
+                        
+                        # Add required metadata
+                        preprocessed_tender["id"] = tender.get("id", processed_count)
+                        preprocessed_tender["language"] = source_schema.get("language", "en")
                 
                 # Normalize tender
                 normalized_tender = self.normalizer.normalize_tender(
