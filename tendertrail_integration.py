@@ -9,30 +9,89 @@ import traceback
 class TenderTrailIntegration:
     """Integration layer for TenderTrail normalization workflow."""
     
-    def __init__(self, normalizer, preprocessor, supabase_url, supabase_key):
-        """Initialize the integration layer."""
-        self.normalizer = normalizer
-        self.preprocessor = preprocessor
-        self.supabase = create_client(supabase_url, supabase_key)
+    def __init__(self, normalizer, preprocessor, supabase_url, supabase_key, skip_direct_connections=False):
+        """
+        Initialize the integration layer.
         
-        # Try to install psycopg2 if it's missing
+        Args:
+            normalizer: The tender normalizer to use
+            preprocessor: The tender preprocessor to use
+            supabase_url: Supabase project URL
+            supabase_key: Supabase API key
+            skip_direct_connections: Set to True to avoid direct PostgreSQL connections (default in Docker)
+        """
         try:
-            import psycopg2
-        except ImportError:
-            print("Installing psycopg2-binary...")
+            self.normalizer = normalizer
+            self.preprocessor = preprocessor
+            self.skip_direct_connections = skip_direct_connections
+            
+            # Detect Docker environment
+            in_docker = False
             try:
-                subprocess.check_call([sys.executable, "-m", "pip", "install", "psycopg2-binary"])
-                print("psycopg2-binary installed successfully")
+                with open('/proc/1/cgroup', 'rt') as f:
+                    if 'docker' in f.read():
+                        in_docker = True
+            except:
+                pass
+            
+            # Auto-enable API-only mode in Docker
+            if in_docker and not skip_direct_connections:
+                print("Docker environment detected - automatically enabling API-only mode")
+                self.skip_direct_connections = True
+            
+            if self.skip_direct_connections:
+                print("="*80)
+                print("INITIALIZING TENDERTRAIL INTEGRATION IN API-ONLY MODE")
+                print("Direct PostgreSQL connections will be disabled")
+                print("This mode is optimized for Docker and cloud environments")
+                print("="*80)
+            
+            # Initialize Supabase client
+            try:
+                self.supabase = create_client(supabase_url, supabase_key)
+                print("Successfully initialized Supabase client")
             except Exception as e:
-                print(f"Failed to install psycopg2-binary: {e}")
-        
-        # Try to create exec_sql function if it doesn't exist
-        self._create_exec_sql_function()
-        
-        # Ensure required tables exist
-        self._create_unified_tenders_table()
-        self._create_errors_table()
-        self._create_target_schema_table()
+                print(f"Error initializing Supabase client: {e}")
+                raise ValueError(f"Failed to initialize Supabase client: {e}")
+            
+            # Try to install psycopg2 if it's missing and we're not in API-only mode
+            if not self.skip_direct_connections:
+                try:
+                    import psycopg2
+                except ImportError:
+                    print("Installing psycopg2-binary...")
+                    try:
+                        subprocess.check_call([sys.executable, "-m", "pip", "install", "psycopg2-binary"])
+                        print("psycopg2-binary installed successfully")
+                    except Exception as e:
+                        print(f"Failed to install psycopg2-binary: {e}")
+                        print("Continuing without direct PostgreSQL support")
+                        self.skip_direct_connections = True
+            
+            # Ensure we're connected to Supabase
+            try:
+                # Simple test query to verify connection
+                self.supabase.table('unified_tenders').select('id').limit(1).execute()
+                print("Verified Supabase connection is working")
+            except Exception as e:
+                print(f"Warning: Could not verify Supabase connection: {e}")
+                print("Will continue initialization but some operations may fail")
+            
+            # Try to create exec_sql function if it doesn't exist
+            self._create_exec_sql_function()
+            
+            # Ensure required tables exist
+            try:
+                self._create_unified_tenders_table()
+                self._create_errors_table()
+                self._create_target_schema_table()
+            except Exception as e:
+                print(f"Warning: Error during table initialization: {e}")
+                print("Will continue with limited functionality")
+        except Exception as e:
+            print(f"Error in __init__: {e}")
+            traceback.print_exc()
+            raise ValueError(f"Failed to initialize TenderTrailIntegration: {e}")
     
     def process_source(self, tenders, source_name, create_tables=True):
         """
@@ -137,23 +196,45 @@ class TenderTrailIntegration:
             tenders = []
             if isinstance(json_data, list):
                 tenders = json_data
+                print(f"Found {len(tenders)} tenders in list format")
             elif isinstance(json_data, dict):
                 # Try to find a list in the dictionary
+                list_found = False
                 for key, value in json_data.items():
                     if isinstance(value, list) and value:
                         tenders = value
-                        print(f"Found tenders list in key: {key}")
+                        list_found = True
+                        print(f"Found {len(tenders)} tenders in dictionary key: '{key}'")
                         break
                 
-                if not tenders and "data" in json_data and json_data["data"]:
-                    tenders = [json_data["data"]]
-                    print("Using 'data' field as a single tender")
+                if not list_found and "data" in json_data and json_data["data"]:
+                    if isinstance(json_data["data"], list):
+                        tenders = json_data["data"]
+                        print(f"Found {len(tenders)} tenders in 'data' field")
+                    else:
+                        tenders = [json_data["data"]]
+                        print("Using 'data' field as a single tender")
             else:
                 print(f"Unsupported JSON data type: {type(json_data)}")
+                print("Expected a list of tenders or a dictionary containing a list of tenders")
                 return 0, 0
             
             # Process the tenders
-            print(f"Found {len(tenders)} tenders to process for source: {source_name}")
+            if not tenders:
+                print(f"No tenders found for source: {source_name}")
+                return 0, 0
+            
+            print(f"Processing {len(tenders)} tenders for source: {source_name}")
+            
+            # Show a preview of the first tender for debugging
+            try:
+                if tenders and len(tenders) > 0:
+                    first_tender = tenders[0]
+                    preview = str(first_tender)[:500] + "..." if len(str(first_tender)) > 500 else str(first_tender)
+                    print(f"First tender preview: {preview}")
+            except Exception as preview_e:
+                print(f"Could not preview first tender: {preview_e}")
+            
             return self.process_source(tenders, source_name)
         
         except Exception as e:
@@ -445,52 +526,26 @@ class TenderTrailIntegration:
                         
                         return
                 except Exception as e:
-                    # If the error indicates the table doesn't exist, try to create it
+                    # If the error indicates the table doesn't exist, log it
                     if "relation" in str(e) and "does not exist" in str(e):
-                        print(f"target_schema table doesn't exist, creating it: {e}")
+                        print(f"target_schema table doesn't exist, but may be created by another process")
                     else:
                         print(f"target_schema table check failed: {e}")
-                        
-                # Try to create the table without RPC first
-                try:
-                    # We will directly try a simple INSERT
-                    print("Creating target_schema table via direct table create")
-                    default_schema = self._get_default_target_schema()
-                    
-                    # Try to create a minimal schema with select, upsert, and delete
-                    create_table_sql = """
-                    CREATE TABLE IF NOT EXISTS public.target_schema (
-                        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                        schema JSONB NOT NULL,
-                        created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
-                        updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
-                    );
-                    """
-                    
-                    # Try to execute the create table via other functions if available
-                    for function_name in ['exec_sql', 'run_sql', 'execute_sql']:
-                        try:
-                            print(f"Attempting to create table via '{function_name}' RPC")
-                            self.supabase.rpc(function_name, {'sql': create_table_sql}).execute()
-                            print(f"Successfully created table via '{function_name}'")
-                            # If successful, try to insert default schema
-                            try:
-                                self.supabase.table('target_schema').insert({
-                                    'schema': default_schema
-                                }).execute()
-                                print("Successfully added default schema")
-                            except Exception as insert_e:
-                                print(f"Failed to insert default schema: {insert_e}")
-                            return
-                        except Exception as fn_e:
-                            print(f"Function '{function_name}' failed: {fn_e}")
-                    
-                    # If we get here, table creation methods failed
-                    print("Could not create target_schema table, continuing with in-memory schema")
-                except Exception as create_e:
-                    print(f"Error creating target_schema table: {create_e}")
+            
             except Exception as e:
                 print(f"Error checking target_schema: {e}")
+            
+            # In API-only mode, we can't create tables directly
+            print("Cannot create target_schema table in API-only mode")
+            print("Please create the table using the Supabase UI or SQL Editor with this schema:")
+            print("""
+            CREATE TABLE IF NOT EXISTS public.target_schema (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                schema JSONB NOT NULL,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+            );
+            """)
             
             # We'll continue with the in-memory default schema
             print("Using in-memory default schema")
@@ -649,64 +704,9 @@ class TenderTrailIntegration:
                 print(f"Error initializing translator: {e}")
             
             # First check if metadata column exists in the table
-            metadata_column_exists = False
-            try:
-                # Try to query with metadata column
-                test_query = """
-                SELECT column_name 
-                FROM information_schema.columns 
-                WHERE table_name = 'unified_tenders' AND column_name = 'metadata';
-                """
-                
-                # Try direct query or RPC
-                try:
-                    response = self.supabase.rpc('exec_sql', {'sql': test_query}).execute()
-                    if response.data and len(response.data) > 0:
-                        metadata_column_exists = True
-                except Exception as direct_e:
-                    print(f"Could not check metadata column: {direct_e}")
-                    
-                if not metadata_column_exists:
-                    # Try alternative method to check if column exists
-                    try:
-                        # Just query a row and check returned columns
-                        response = self.supabase.table('unified_tenders').select('*').limit(1).execute()
-                        if hasattr(response, 'data') and response.data:
-                            row = response.data[0]
-                            if 'metadata' in row:
-                                metadata_column_exists = True
-                                print("Metadata column exists in unified_tenders table")
-                    except Exception as alt_e:
-                        print(f"Alternative metadata column check failed: {alt_e}")
-            except Exception as e:
-                print(f"Error checking metadata column: {e}")
-            
-            # If metadata column doesn't exist, try to add it
-            if not metadata_column_exists:
-                try:
-                    print("Attempting to add metadata column to unified_tenders table")
-                    alter_sql = 'ALTER TABLE unified_tenders ADD COLUMN IF NOT EXISTS metadata JSONB;'
-                    
-                    # Try RPC functions
-                    for function_name in ['exec_sql', 'run_sql', 'execute_sql']:
-                        try:
-                            self.supabase.rpc(function_name, {'sql': alter_sql}).execute()
-                            metadata_column_exists = True
-                            print(f"Successfully added metadata column via '{function_name}'")
-                            break
-                        except Exception as fn_e:
-                            print(f"Function '{function_name}' failed: {fn_e}")
-                    
-                    # If RPC failed, try direct SQL
-                    if not metadata_column_exists:
-                        try:
-                            self._run_sql_directly(alter_sql)
-                            metadata_column_exists = True
-                            print("Added metadata column via direct SQL")
-                        except Exception as direct_e:
-                            print(f"Direct SQL failed: {direct_e}")
-                except Exception as alter_e:
-                    print(f"Failed to add metadata column: {alter_e}")
+            # In API-only mode, we'll assume the metadata column exists
+            metadata_column_exists = True
+            print("Assuming metadata column exists in API-only mode")
             
             # Ensure all fields are properly formatted
             for tender in normalized_tenders:
@@ -845,14 +845,8 @@ class TenderTrailIntegration:
                     print(f"Error preparing tender for insertion: {tender_e}")
                     continue
             
-            # Create unified_tenders table if it doesn't exist
-            try:
-                self._create_unified_tenders_table()
-            except Exception as e:
-                print(f"Error creating unified_tenders table: {e}")
-            
             # Insert in batches to avoid timeout issues
-            batch_size = 20  # Smaller batch size for better error handling
+            batch_size = 10  # Smaller batch size for better error handling
             for i in range(0, len(tenders_to_insert), batch_size):
                 batch = tenders_to_insert[i:i + batch_size]
                 try:
@@ -866,20 +860,40 @@ class TenderTrailIntegration:
                         inserted_count += len(batch)  # Assume success
                 except Exception as batch_error:
                     print(f"Error inserting batch: {batch_error}")
-                    # Try to insert one by one
+                    
+                    # Check for common errors
+                    error_str = str(batch_error)
+                    if "timeout" in error_str.lower():
+                        print("Connection timeout error - consider using smaller batch sizes")
+                    elif "duplicate key" in error_str.lower():
+                        print("Duplicate tender entries detected - some tenders already exist in the database")
+                    
+                    # Try to insert one by one with even smaller batches
                     print(f"Attempting one-by-one insertion for batch {i//batch_size + 1}")
-                    for tender in batch:
+                    for j in range(0, len(batch), 3):  # Try with micro-batches of 3
+                        micro_batch = batch[j:j+3]
                         try:
-                            response = self.supabase.table('unified_tenders').insert(tender).execute()
+                            response = self.supabase.table('unified_tenders').insert(micro_batch).execute()
                             if hasattr(response, 'data'):
-                                inserted_count += 1
-                        except Exception as single_error:
-                            print(f"Error inserting single tender: {single_error}")
+                                inserted_count += len(micro_batch)
+                                print(f"Inserted micro-batch of {len(micro_batch)} tenders")
+                        except Exception as micro_error:
+                            # Final fallback - truly one by one
+                            for tender in micro_batch:
+                                try:
+                                    response = self.supabase.table('unified_tenders').insert(tender).execute()
+                                    if hasattr(response, 'data'):
+                                        inserted_count += 1
+                                        print(f"Inserted single tender")
+                                except Exception as single_error:
+                                    print(f"Error inserting single tender: {single_error}")
             
             print(f"Successfully inserted {inserted_count} out of {len(normalized_tenders)} tenders")
             return inserted_count
         except Exception as e:
             print(f"Error inserting normalized tenders: {e}")
+            if "timeout" in str(e).lower():
+                print("Connection timeout - network conditions may be affecting database access")
             print("Data sample that failed:", normalized_tenders[0] if normalized_tenders else "No data")
             return 0
     
@@ -1404,6 +1418,11 @@ class TenderTrailIntegration:
     def _create_exec_sql_function(self):
         """Attempt to create the exec_sql function if it doesn't exist."""
         try:
+            # If we're in API-only mode, skip direct connection attempts
+            if hasattr(self, 'skip_direct_connections') and self.skip_direct_connections:
+                print("Skipping exec_sql function creation in API-only mode")
+                return False
+            
             # Check if exec_sql exists already
             function_exists = False
             try:
@@ -1413,87 +1432,26 @@ class TenderTrailIntegration:
                 function_exists = True
             except Exception as e:
                 if "Could not find the function" in str(e) or "does not exist" in str(e):
-                    print("exec_sql function does not exist, will try to create it")
+                    print("exec_sql function does not exist, will continue without it")
                 else:
                     print(f"Error checking exec_sql function: {e}")
             
-            if function_exists:
-                return True
-            
-            # Try to create the function using direct psycopg2 connection if possible
-            try:
-                # Try to use URL and key from supabase client to connect
-                from urllib.parse import urlparse
-                import psycopg2
-                
-                # Try to extract URL from client
-                url = None
-                if hasattr(self.supabase, 'url'):
-                    url = self.supabase.url
-                elif hasattr(self.supabase, '_url'):
-                    url = self.supabase._url
-                elif hasattr(self.supabase, 'rest_url'):
-                    url = self.supabase.rest_url
-                    
-                # Try to extract key from client
-                key = None
-                if hasattr(self.supabase, 'key'):
-                    key = self.supabase.key
-                elif hasattr(self.supabase, '_key'):
-                    key = self.supabase._key
-                elif hasattr(self.supabase, 'supabase_key'):
-                    key = self.supabase.supabase_key
-                    
-                if not url or not key:
-                    print("Could not extract URL and key from Supabase client")
-                    return False
-                    
-                # Get the host from the URL
-                parsed_url = urlparse(url)
-                if not parsed_url.netloc:
-                    print(f"Invalid URL format: {url}")
-                    return False
-                    
-                # Extract project ID from host 
-                host_parts = parsed_url.netloc.split('.')
-                if len(host_parts) < 2:
-                    print(f"Could not parse host from URL: {url}")
-                    return False
-                    
-                project_id = host_parts[0]
-                
-                # Connect to the database using psycopg2
-                conn_string = f"postgresql://postgres:{key}@{project_id}.supabase.co:5432/postgres"
-                
-                print(f"Attempting to connect to {project_id}.supabase.co")
-                conn = psycopg2.connect(conn_string, connect_timeout=10)
-                cursor = conn.cursor()
-                
-                # Create the exec_sql function
-                exec_sql_function = """
-                CREATE OR REPLACE FUNCTION public.exec_sql(sql text)
-                RETURNS void AS $$
-                BEGIN
-                  EXECUTE sql;
-                END;
-                $$ LANGUAGE plpgsql SECURITY DEFINER;
-                """
-                
-                cursor.execute(exec_sql_function)
-                conn.commit()
-                cursor.close()
-                conn.close()
-                print("Successfully created exec_sql function")
-                return True
-            except Exception as direct_e:
-                print(f"Could not create exec_sql function via direct connection: {direct_e}")
-            
-            # If we couldn't create the function, we'll just continue without it
-            print("Will continue without exec_sql function, using fallback methods for schema creation")
-            return False
+            # Skip direct connection attempts in Docker/cloud environments
+            print("Skipping direct PostgreSQL connection attempts - will use API-only mode")
+            print("Will continue without exec_sql function, using API-based methods for operations")
+            return function_exists
         except Exception as e:
             print(f"Error in _create_exec_sql_function: {e}")
             return False
+
+    def _run_sql_directly(self, sql):
+        """
+        This is a stub that avoids direct PostgreSQL connections.
+        In API-only mode, we don't attempt direct SQL execution.
+        """
+        print("Direct SQL execution disabled in API-only mode")
+        print("Using Supabase REST API for all operations")
+        raise NotImplementedError("Direct SQL execution is disabled in API-only mode")
 
     def _create_unified_tenders_table(self) -> None:
         """Create unified_tenders table if it doesn't exist with all required columns."""
@@ -1509,16 +1467,17 @@ class TenderTrailIntegration:
                     return
             except Exception as e:
                 if "relation" in str(e) and "does not exist" in str(e):
-                    print("unified_tenders table doesn't exist, will try to create it")
+                    print("unified_tenders table doesn't exist, but may be created by another process")
                 else:
                     print(f"Error checking unified_tenders table: {e}")
             
             if table_exists:
                 return
             
-            # Table doesn't exist, try to create it
-            # Define SQL to create table with all required columns
-            create_table_sql = """
+            # In API-only mode, we can't create tables directly
+            print("Cannot create unified_tenders table in API-only mode")
+            print("Please create the table using the Supabase UI or SQL Editor with this schema:")
+            print("""
             CREATE TABLE IF NOT EXISTS public.unified_tenders (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 title TEXT,
@@ -1540,107 +1499,14 @@ class TenderTrailIntegration:
                 metadata JSONB,
                 CONSTRAINT unified_tenders_source_raw_id_unique UNIQUE (source, raw_id)
             );
-            """
             
-            # Also create index for source for faster querying
-            create_index_sql = """
             CREATE INDEX IF NOT EXISTS unified_tenders_source_idx ON public.unified_tenders (source);
-            """
+            """)
             
-            # Try to execute via RPC functions
-            for function_name in ['exec_sql', 'run_sql', 'execute_sql']:
-                try:
-                    print(f"Attempting to create table via '{function_name}' RPC")
-                    self.supabase.rpc(function_name, {'sql': create_table_sql}).execute()
-                    print(f"Successfully created table via '{function_name}'")
-                    
-                    # Create index
-                    try:
-                        self.supabase.rpc(function_name, {'sql': create_index_sql}).execute()
-                        print(f"Successfully created index via '{function_name}'")
-                    except Exception as idx_e:
-                        print(f"Error creating index: {idx_e}")
-                    
-                    return
-                except Exception as fn_e:
-                    print(f"Function '{function_name}' failed: {fn_e}")
-            
-            # Try direct SQL via psycopg2 connection
-            try:
-                self._run_sql_directly(create_table_sql)
-                print("Created unified_tenders table via direct SQL")
-                
-                # Create index
-                try:
-                    self._run_sql_directly(create_index_sql)
-                    print("Created index via direct SQL")
-                except Exception as idx_e:
-                    print(f"Error creating index: {idx_e}")
-                
-                return
-            except Exception as direct_e:
-                print(f"Direct SQL failed: {direct_e}")
-            
-            print("Failed to create unified_tenders table, operations may fail")
+            # Try inserting into the table anyway - it might exist but select was rejected due to permissions
+            print("Will attempt to continue operations assuming the table exists")
         except Exception as e:
             print(f"Error in _create_unified_tenders_table: {e}")
-
-    def _run_sql_directly(self, sql):
-        """Run SQL directly via psycopg2 connection."""
-        try:
-            # Try to use URL and key from supabase client to connect
-            from urllib.parse import urlparse
-            import psycopg2
-            
-            # Try to extract URL from client
-            url = None
-            if hasattr(self.supabase, 'url'):
-                url = self.supabase.url
-            elif hasattr(self.supabase, '_url'):
-                url = self.supabase._url
-            elif hasattr(self.supabase, 'rest_url'):
-                url = self.supabase.rest_url
-                
-            # Try to extract key from client
-            key = None
-            if hasattr(self.supabase, 'key'):
-                key = self.supabase.key
-            elif hasattr(self.supabase, '_key'):
-                key = self.supabase._key
-            elif hasattr(self.supabase, 'supabase_key'):
-                key = self.supabase.supabase_key
-                
-            if not url or not key:
-                raise ValueError("Could not extract URL and key from Supabase client")
-                
-            # Get the host from the URL
-            parsed_url = urlparse(url)
-            if not parsed_url.netloc:
-                raise ValueError(f"Invalid URL format: {url}")
-                
-            # Extract project ID from host 
-            host_parts = parsed_url.netloc.split('.')
-            if len(host_parts) < 2:
-                raise ValueError(f"Could not parse host from URL: {url}")
-                
-            project_id = host_parts[0]
-            
-            # Connect to the database using psycopg2
-            conn_string = f"postgresql://postgres:{key}@{project_id}.supabase.co:5432/postgres"
-            
-            print(f"Connecting to {project_id}.supabase.co")
-            conn = psycopg2.connect(conn_string, connect_timeout=10)
-            cursor = conn.cursor()
-            
-            # Execute the SQL
-            cursor.execute(sql)
-            conn.commit()
-            cursor.close()
-            conn.close()
-            return True
-        except Exception as e:
-            print(f"Error running SQL directly: {e}")
-            raise
 
     def _create_errors_table(self) -> None:
         """Create normalization_errors table if it doesn't exist."""
@@ -1648,43 +1514,25 @@ class TenderTrailIntegration:
             # Check if table already exists
             table_exists = False
             try:
-                # Try direct query to see if table exists
-                test_query = """
-                SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
-                    WHERE table_schema = 'public'
-                    AND table_name = 'normalization_errors'
-                );
-                """
-                
-                # Try with exec_sql
-                try:
-                    response = self.supabase.rpc('exec_sql', {'sql': test_query}).execute()
-                    if response.data and response.data[0] and response.data[0].get('exists'):
-                        table_exists = True
-                        print("normalization_errors table already exists")
-                        return
-                except Exception as e:
-                    # Try direct query
-                    try:
-                        response = self.supabase.table('normalization_errors').select('id').limit(1).execute()
-                        if hasattr(response, 'data'):
-                            table_exists = True
-                            print("normalization_errors table already exists")
-                            return
-                    except Exception as e2:
-                        if "relation" in str(e2) and "does not exist" in str(e2):
-                            print("normalization_errors table doesn't exist, will try to create it")
-                        else:
-                            print(f"Error checking normalization_errors table: {e2}")
+                # Try direct query to see if table exists  
+                response = self.supabase.table('normalization_errors').select('id').limit(1).execute()
+                if hasattr(response, 'data'):
+                    table_exists = True
+                    print("normalization_errors table already exists")
+                    return
             except Exception as e:
-                print(f"Error checking if normalization_errors table exists: {e}")
+                if "relation" in str(e) and "does not exist" in str(e):
+                    print("normalization_errors table doesn't exist, but may be created by another process")
+                else:
+                    print(f"Error checking normalization_errors table: {e}")
             
             if table_exists:
                 return
             
-            # Table doesn't exist, try to create it
-            create_table_sql = """
+            # In API-only mode, we can't create tables directly
+            print("Cannot create normalization_errors table in API-only mode")
+            print("Please create the table using the Supabase UI or SQL Editor with this schema:")
+            print("""
             CREATE TABLE IF NOT EXISTS public.normalization_errors (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 source TEXT NOT NULL,
@@ -1693,41 +1541,24 @@ class TenderTrailIntegration:
                 tender_data TEXT,
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
             );
-            """
+            """)
             
-            # Try to execute via RPC functions
-            for function_name in ['exec_sql', 'run_sql', 'execute_sql']:
-                try:
-                    print(f"Attempting to create normalization_errors table via '{function_name}' RPC")
-                    self.supabase.rpc(function_name, {'sql': create_table_sql}).execute()
-                    print(f"Successfully created normalization_errors table via '{function_name}'")
-                    return
-                except Exception as fn_e:
-                    print(f"Function '{function_name}' failed: {fn_e}")
-            
-            # Try direct SQL via psycopg2 connection
-            try:
-                self._run_sql_directly(create_table_sql)
-                print("Created normalization_errors table via direct SQL")
-                return
-            except Exception as direct_e:
-                print(f"Direct SQL failed: {direct_e}")
-            
-            print("Failed to create normalization_errors table, error tracking may not work")
+            # We'll continue without error tracking in this case
+            print("Will continue without error tracking capabilities")
         except Exception as e:
             print(f"Error in _create_errors_table: {e}")
 
     def _insert_error(self, source: str, error_type: str, error_message: str, tender_data: str = "") -> None:
         """Insert an error record into the normalization_errors table."""
         try:
-            # Ensure table exists
-            self._create_errors_table()
+            # In API-only mode, we'll first try to insert the error directly
+            # without attempting to create the table via SQL
             
             # Truncate tender_data if it's too long
             if tender_data and len(tender_data) > 10000:
                 tender_data = tender_data[:10000] + "... [truncated]"
             
-            # Insert error record
+            # Create error record
             error_record = {
                 'source': source,
                 'error_type': error_type,
@@ -1735,41 +1566,29 @@ class TenderTrailIntegration:
                 'tender_data': tender_data
             }
             
+            # First try direct insert - table might exist already
             try:
-                self.supabase.table('normalization_errors').insert(error_record).execute()
-                print(f"Inserted error record for {source}: {error_type}")
+                response = self.supabase.table('normalization_errors').insert(error_record).execute()
+                if hasattr(response, 'data'):
+                    print(f"Inserted error record for {source}: {error_type}")
+                    return
             except Exception as e:
-                print(f"Failed to insert error record: {e}")
-                
-                # Try to add via SQL if table insert fails
-                try:
-                    # Escape values for SQL
-                    source_esc = source.replace("'", "''")
-                    error_type_esc = error_type.replace("'", "''")
-                    error_message_esc = error_message[:2000].replace("'", "''")
-                    tender_data_esc = tender_data.replace("'", "''")
-                    
-                    insert_sql = f"""
-                    INSERT INTO public.normalization_errors (source, error_type, error_message, tender_data)
-                    VALUES ('{source_esc}', '{error_type_esc}', '{error_message_esc}', '{tender_data_esc}');
-                    """
-                    
-                    # Try to use RPC function
-                    for function_name in ['exec_sql', 'run_sql', 'execute_sql']:
-                        try:
-                            self.supabase.rpc(function_name, {'sql': insert_sql}).execute()
-                            print(f"Inserted error record via {function_name}")
-                            return
-                        except Exception as fn_e:
-                            print(f"Function '{function_name}' failed for error insert: {fn_e}")
-                    
-                    # Try direct SQL
-                    self._run_sql_directly(insert_sql)
-                    print("Inserted error record via direct SQL")
-                except Exception as sql_e:
-                    print(f"Failed to insert error record via SQL: {sql_e}")
+                # If error table doesn't exist or permissions don't allow insert
+                if "relation" in str(e) and "does not exist" in str(e):
+                    print("normalization_errors table doesn't exist - errors will be logged to console only")
+                else:
+                    print(f"Error inserting error record: {e}")
+            
+            # Just log to console if we can't insert into the database
+            print(f"ERROR RECORD [{source}] - Type: {error_type}")
+            print(f"ERROR MESSAGE: {error_message[:200]}")
+            if tender_data:
+                print(f"ERROR DATA: {tender_data[:200]}...")
+            
         except Exception as e:
             print(f"Error in _insert_error: {e}")
+            # Log the original error to make sure it's visible
+            print(f"Original error: [{source}] {error_type}: {error_message[:200]}")
 
     def _parse_date(self, date_str):
         """Parse a date string into ISO format (YYYY-MM-DD)."""
