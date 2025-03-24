@@ -1,4 +1,6 @@
 import json
+import sys
+import subprocess
 from typing import Dict, Any, List, Optional
 from supabase import create_client, Client
 
@@ -10,6 +12,18 @@ class TenderTrailIntegration:
         self.normalizer = normalizer
         self.preprocessor = preprocessor
         self.supabase = create_client(supabase_url, supabase_key)
+        
+        # Try to install psycopg2 if it's missing
+        try:
+            import psycopg2
+        except ImportError:
+            print("Installing psycopg2-binary...")
+            try:
+                subprocess.check_call([sys.executable, "-m", "pip", "install", "psycopg2-binary"])
+                print("psycopg2-binary installed successfully")
+            except Exception as e:
+                print(f"Failed to install psycopg2-binary: {e}")
+        
         # Ensure required tables exist
         self._create_unified_tenders_table()
         self._create_errors_table()
@@ -33,18 +47,10 @@ class TenderTrailIntegration:
         normalized_tenders = []
         errors = []
         
-        for tender in raw_tenders:
+        for raw_tender in raw_tenders:
             try:
-                # Make sure tender is a dict, not a string
-                if isinstance(tender, str):
-                    try:
-                        tender = json.loads(tender)
-                    except Exception as e:
-                        raise ValueError(f"Tender is a string and cannot be parsed as JSON: {e}")
-                
-                # Ensure tender is a dictionary
-                if not isinstance(tender, dict):
-                    raise ValueError(f"Tender is not a dictionary, but a {type(tender)}")
+                # Deep copy to avoid modifying original data
+                tender = self._ensure_dict(raw_tender)
                 
                 # Preprocess tender
                 preprocessed_tender = self.preprocessor.preprocess(tender, source_schema)
@@ -68,19 +74,7 @@ class TenderTrailIntegration:
             except Exception as e:
                 error_count += 1
                 # Safely extract tender_id for error logging
-                tender_id = None
-                if isinstance(tender, dict):
-                    tender_id = tender.get('id')
-                elif isinstance(tender, str):
-                    try:
-                        parsed = json.loads(tender)
-                        if isinstance(parsed, dict):
-                            tender_id = parsed.get('id')
-                    except:
-                        pass
-                
-                if tender_id is None:
-                    tender_id = processed_count
+                tender_id = self._extract_tender_id(raw_tender, processed_count)
                 
                 errors.append({
                     'tender_id': str(tender_id),
@@ -105,6 +99,59 @@ class TenderTrailIntegration:
             'success_count': success_count,
             'error_count': error_count
         }
+    
+    def _ensure_dict(self, data: Any) -> Dict[str, Any]:
+        """Ensure that data is a dictionary."""
+        if isinstance(data, dict):
+            return data
+        
+        if isinstance(data, str):
+            try:
+                parsed = json.loads(data)
+                if isinstance(parsed, dict):
+                    return parsed
+                else:
+                    raise ValueError(f"Parsed JSON is not a dictionary but a {type(parsed)}")
+            except Exception as e:
+                raise ValueError(f"Could not parse string as JSON: {e}")
+        
+        # Check if it's a database record with data in a 'data' field or similar
+        if hasattr(data, 'get') and callable(data.get):
+            # It might be a record-like object with a get method
+            if 'data' in data and isinstance(data.get('data'), dict):
+                return data.get('data')
+            
+            # Check if it has common tender fields
+            for field in ['id', 'title', 'description']:
+                if field in data:
+                    return data
+        
+        # If we got here, we couldn't make it a dict
+        raise ValueError(f"Cannot convert {type(data)} to dictionary")
+    
+    def _extract_tender_id(self, tender: Any, default_id: int) -> str:
+        """Safely extract tender ID from various data formats."""
+        # Handle dictionary directly
+        if isinstance(tender, dict):
+            return tender.get('id', default_id)
+        
+        # Handle JSON string
+        if isinstance(tender, str):
+            try:
+                parsed = json.loads(tender)
+                if isinstance(parsed, dict):
+                    return parsed.get('id', default_id)
+            except:
+                pass
+        
+        # Handle record-like objects
+        if hasattr(tender, 'get') and callable(tender.get):
+            id_val = tender.get('id')
+            if id_val is not None:
+                return id_val
+        
+        # Fall back to default
+        return default_id
     
     def _get_source_schema(self, source_name: str) -> Dict[str, Any]:
         """Get source schema from database or config."""
@@ -273,115 +320,6 @@ class TenderTrailIntegration:
         except Exception as e:
             print(f"Error in _create_target_schema_table: {e}")
     
-    def _run_sql_directly(self, sql: str) -> None:
-        """Run SQL directly using psycopg2 connection if available."""
-        try:
-            # This is a fallback method if RPC is not available
-            # It will attempt to use psycopg2 directly if available
-            import psycopg2
-            from urllib.parse import urlparse
-            
-            # Parse Supabase URL to get connection details
-            # Format is typically: https://[project-id].supabase.co
-            parsed_url = urlparse(self.supabase._url)
-            host = parsed_url.netloc.split('.')[0]
-            
-            # Connect directly to PostgreSQL
-            conn = psycopg2.connect(
-                host=f"{host}.supabase.co",
-                database="postgres",
-                user="postgres",
-                password=self.supabase._key
-            )
-            
-            # Execute SQL
-            with conn.cursor() as cur:
-                cur.execute(sql)
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            print(f"Failed to run SQL directly: {e}")
-    
-    def _get_default_target_schema(self) -> Dict[str, Any]:
-        """Get default target schema."""
-        return {
-            "title": {
-                "type": "string",
-                "description": "Title of the tender",
-                "format": "Title case, max 200 characters"
-            },
-            "description": {
-                "type": "string",
-                "description": "Detailed description of the tender",
-                "format": "Plain text, max 2000 characters",
-                "requires_translation": True
-            },
-            "date_published": {
-                "type": "string",
-                "description": "Date when the tender was published",
-                "format": "ISO 8601 (YYYY-MM-DD)"
-            },
-            "closing_date": {
-                "type": "string",
-                "description": "Deadline for tender submissions",
-                "format": "ISO 8601 (YYYY-MM-DD)"
-            },
-            "tender_value": {
-                "type": "string",
-                "description": "Estimated value of the tender",
-                "format": "Numeric value followed by currency code (e.g., 1000000 USD)"
-            },
-            "tender_currency": {
-                "type": "string",
-                "description": "Currency of the tender value",
-                "format": "ISO 4217 currency code (e.g., USD, EUR)",
-                "extract_from": {
-                    "field": "tender_value"
-                }
-            },
-            "location": {
-                "type": "string",
-                "description": "Location where the project will be implemented",
-                "format": "City, Country"
-            },
-            "issuing_authority": {
-                "type": "string",
-                "description": "Organization issuing the tender",
-                "format": "Official organization name"
-            },
-            "keywords": {
-                "type": "string",
-                "description": "Keywords related to the tender",
-                "format": "Comma-separated list of keywords",
-                "extract_from": {
-                    "field": "description"
-                }
-            },
-            "tender_type": {
-                "type": "string",
-                "description": "Type of tender",
-                "format": "One of: Goods, Works, Services, Consulting",
-                "extract_from": {
-                    "field": "description"
-                }
-            },
-            "project_size": {
-                "type": "string",
-                "description": "Size of the project",
-                "format": "One of: Small, Medium, Large, Very Large",
-                "extract_from": {
-                    "field": "tender_value"
-                }
-            },
-            "contact_information": {
-                "type": "string",
-                "description": "Contact information for inquiries",
-                "format": "Name, email, phone number",
-                "default": ""
-            },
-            "language": "en"
-        }
-    
     def _get_raw_tenders(self, source_name: str, batch_size: int) -> List[Dict[str, Any]]:
         """Get raw tenders from source table."""
         try:
@@ -393,13 +331,10 @@ class TenderTrailIntegration:
                     # Parse any string tenders into dictionaries
                     processed_tenders = []
                     for tender in response.data:
-                        if isinstance(tender, str):
-                            try:
-                                tender = json.loads(tender)
-                            except:
-                                # Keep as is if parsing fails
-                                pass
-                        processed_tenders.append(tender)
+                        try:
+                            processed_tenders.append(tender)
+                        except Exception as e:
+                            print(f"Error processing raw tender: {e}")
                     return processed_tenders
             except Exception as e:
                 print(f"Table {table_name} not found, trying direct source table {source_name}")
@@ -411,37 +346,21 @@ class TenderTrailIntegration:
                     response = self.supabase.table(source_name).select('*').eq('processed', False).limit(batch_size).execute()
                     # Mark processed records
                     if response.data:
-                        ids = [item['id'] for item in response.data if 'id' in item]
+                        ids = []
+                        for item in response.data:
+                            if isinstance(item, dict) and 'id' in item:
+                                ids.append(item['id'])
+                        
                         if ids:
                             self.supabase.table(source_name).update({'processed': True}).in_('id', ids).execute()
                         
-                        # Parse any string tenders into dictionaries
-                        processed_tenders = []
-                        for tender in response.data:
-                            if isinstance(tender, str):
-                                try:
-                                    tender = json.loads(tender)
-                                except:
-                                    # Keep as is if parsing fails
-                                    pass
-                            processed_tenders.append(tender)
-                        return processed_tenders
+                        return response.data
                 except Exception as e:
                     print(f"Error querying with processed field, trying without: {e}")
                     # Try without processed field
                     response = self.supabase.table(source_name).select('*').limit(batch_size).execute()
                     if response.data:
-                        # Parse any string tenders into dictionaries
-                        processed_tenders = []
-                        for tender in response.data:
-                            if isinstance(tender, str):
-                                try:
-                                    tender = json.loads(tender)
-                                except:
-                                    # Keep as is if parsing fails
-                                    pass
-                            processed_tenders.append(tender)
-                        return processed_tenders
+                        return response.data
             except Exception as e:
                 print(f"Error querying table {source_name}: {e}")
             
@@ -547,3 +466,123 @@ class TenderTrailIntegration:
         """Get current timestamp in ISO format."""
         from datetime import datetime
         return datetime.utcnow().isoformat()
+    
+    def _run_sql_directly(self, sql: str) -> None:
+        """Run SQL directly using psycopg2 connection if available."""
+        try:
+            # This is a fallback method if RPC is not available
+            # It will attempt to use psycopg2 directly if available
+            try:
+                import psycopg2
+            except ImportError:
+                print("Installing psycopg2-binary...")
+                try:
+                    subprocess.check_call([sys.executable, "-m", "pip", "install", "psycopg2-binary"])
+                    import psycopg2
+                    print("psycopg2-binary installed successfully")
+                except Exception as e:
+                    print(f"Failed to install psycopg2-binary: {e}")
+                    return
+                
+            from urllib.parse import urlparse
+            
+            # Parse Supabase URL to get connection details
+            # Format is typically: https://[project-id].supabase.co
+            parsed_url = urlparse(self.supabase._url)
+            host = parsed_url.netloc.split('.')[0]
+            
+            # Connect directly to PostgreSQL
+            conn = psycopg2.connect(
+                host=f"{host}.supabase.co",
+                database="postgres",
+                user="postgres",
+                password=self.supabase._key
+            )
+            
+            # Execute SQL
+            with conn.cursor() as cur:
+                cur.execute(sql)
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"Failed to run SQL directly: {e}")
+            
+    def _get_default_target_schema(self) -> Dict[str, Any]:
+        """Get default target schema."""
+        return {
+            "title": {
+                "type": "string",
+                "description": "Title of the tender",
+                "format": "Title case, max 200 characters"
+            },
+            "description": {
+                "type": "string",
+                "description": "Detailed description of the tender",
+                "format": "Plain text, max 2000 characters",
+                "requires_translation": True
+            },
+            "date_published": {
+                "type": "string",
+                "description": "Date when the tender was published",
+                "format": "ISO 8601 (YYYY-MM-DD)"
+            },
+            "closing_date": {
+                "type": "string",
+                "description": "Deadline for tender submissions",
+                "format": "ISO 8601 (YYYY-MM-DD)"
+            },
+            "tender_value": {
+                "type": "string",
+                "description": "Estimated value of the tender",
+                "format": "Numeric value followed by currency code (e.g., 1000000 USD)"
+            },
+            "tender_currency": {
+                "type": "string",
+                "description": "Currency of the tender value",
+                "format": "ISO 4217 currency code (e.g., USD, EUR)",
+                "extract_from": {
+                    "field": "tender_value"
+                }
+            },
+            "location": {
+                "type": "string",
+                "description": "Location where the project will be implemented",
+                "format": "City, Country"
+            },
+            "issuing_authority": {
+                "type": "string",
+                "description": "Organization issuing the tender",
+                "format": "Official organization name"
+            },
+            "keywords": {
+                "type": "string",
+                "description": "Keywords related to the tender",
+                "format": "Comma-separated list of keywords",
+                "extract_from": {
+                    "field": "description"
+                }
+            },
+            "tender_type": {
+                "type": "string",
+                "description": "Type of tender",
+                "format": "One of: Goods, Works, Services, Consulting",
+                "extract_from": {
+                    "field": "description"
+                }
+            },
+            "project_size": {
+                "type": "string",
+                "description": "Size of the project",
+                "format": "One of: Small, Medium, Large, Very Large",
+                "extract_from": {
+                    "field": "tender_value"
+                }
+            },
+            "contact_information": {
+                "type": "string",
+                "description": "Contact information for inquiries",
+                "format": "Name, email, phone number",
+                "default": ""
+            },
+            "language": "en"
+        }
