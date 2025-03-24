@@ -528,12 +528,17 @@ class TenderTrailIntegration:
                 
                 # Optional fields that match the database schema 
                 optional_fields = [
-                    "description", "date_published", "closing_date", 
                     "tender_value", "tender_currency", "location", 
                     "issuing_authority", "keywords", "tender_type", 
                     "project_size", "contact_information", "raw_id", 
                     "processed_at"
                 ]
+                
+                # Date fields that need special handling
+                date_fields = ["date_published", "closing_date"]
+                
+                # Text fields that should always be included
+                text_fields = ["description"]
                 
                 # Ensure required fields exist
                 for field, default_value in required_fields.items():
@@ -542,9 +547,34 @@ class TenderTrailIntegration:
                     else:
                         cleaned_tender[field] = default_value
                 
+                # Handle text fields
+                for field in text_fields:
+                    if field in tender and tender[field] is not None:
+                        cleaned_tender[field] = str(tender[field])[:2000]  # Truncate long values
+                    else:
+                        cleaned_tender[field] = ""  # Empty string is valid for text fields
+                
+                # Handle date fields - set to NULL (None) if empty or invalid
+                for field in date_fields:
+                    if field in tender and tender[field] and tender[field] != "":
+                        try:
+                            # Try to parse and format the date if it's not already in YYYY-MM-DD format
+                            if isinstance(tender[field], str) and not self._is_valid_date_format(tender[field]):
+                                parsed_date = self._parse_date(tender[field])
+                                if parsed_date:
+                                    cleaned_tender[field] = parsed_date
+                                else:
+                                    cleaned_tender[field] = None  # Set to NULL if can't parse
+                            else:
+                                cleaned_tender[field] = tender[field]
+                        except:
+                            cleaned_tender[field] = None  # Set to NULL on error
+                    else:
+                        cleaned_tender[field] = None  # Set to NULL if empty
+                
                 # Add optional fields if they exist
                 for field in optional_fields:
-                    if field in tender and tender[field] is not None and field not in cleaned_tender:
+                    if field in tender and tender[field] is not None and tender[field] != "" and field not in cleaned_tender:
                         if isinstance(tender[field], (dict, list)):
                             # Convert complex objects to JSON string
                             cleaned_tender[field] = json.dumps(tender[field])[:2000]  # Truncate long JSON
@@ -590,6 +620,48 @@ class TenderTrailIntegration:
             print(f"Error inserting normalized tenders: {e}")
             print("Data sample that failed:", normalized_tenders[0] if normalized_tenders else "No data")
             return None
+    
+    def _is_valid_date_format(self, date_str):
+        """Check if a date string is in YYYY-MM-DD format."""
+        if not isinstance(date_str, str):
+            return False
+        
+        try:
+            # Try to match YYYY-MM-DD format
+            import re
+            return re.match(r'^\d{4}-\d{2}-\d{2}$', date_str) is not None
+        except:
+            return False
+    
+    def _parse_date(self, date_str):
+        """Try to parse a date string into YYYY-MM-DD format."""
+        if not date_str or not isinstance(date_str, str):
+            return None
+        
+        # Common date formats to try
+        try:
+            from dateutil import parser
+            parsed_date = parser.parse(date_str)
+            return parsed_date.strftime('%Y-%m-%d')
+        except:
+            try:
+                # Try common formats
+                import datetime
+                formats = [
+                    '%Y-%m-%d', '%m/%d/%Y', '%d/%m/%Y', '%d-%m-%Y', '%Y/%m/%d',
+                    '%b %d, %Y', '%d %b %Y', '%B %d, %Y', '%d %B %Y'
+                ]
+                
+                for fmt in formats:
+                    try:
+                        return datetime.datetime.strptime(date_str, fmt).strftime('%Y-%m-%d')
+                    except:
+                        continue
+                    
+                # If nothing works, return None
+                return None
+            except:
+                return None
     
     def _create_unified_tenders_table(self):
         """Create unified_tenders table if it doesn't exist."""
