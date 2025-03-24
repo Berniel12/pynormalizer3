@@ -31,6 +31,13 @@ class TenderTrailIntegration:
         
         for tender in raw_tenders:
             try:
+                # Make sure tender is a dict, not a string
+                if isinstance(tender, str):
+                    try:
+                        tender = json.loads(tender)
+                    except:
+                        raise ValueError(f"Tender is a string and cannot be parsed as JSON")
+                
                 # Preprocess tender
                 preprocessed_tender = self.preprocessor.preprocess(tender, source_schema)
                 
@@ -41,7 +48,7 @@ class TenderTrailIntegration:
                 
                 # Add metadata
                 normalized_tender['source'] = source_name
-                normalized_tender['raw_id'] = tender.get('id')
+                normalized_tender['raw_id'] = str(tender.get('id', ''))
                 normalized_tender['processed_at'] = self._get_current_timestamp()
                 
                 # Add to batch
@@ -50,12 +57,13 @@ class TenderTrailIntegration:
                 
             except Exception as e:
                 error_count += 1
+                tender_id = tender.get('id') if isinstance(tender, dict) else processed_count
                 errors.append({
-                    'tender_id': tender.get('id'),
+                    'tender_id': str(tender_id),
                     'error': str(e),
                     'source': source_name
                 })
-                print(f"Error processing tender {tender.get('id')}: {e}")
+                print(f"Error processing tender {tender_id}: {e}")
             
             processed_count += 1
         
@@ -79,7 +87,12 @@ class TenderTrailIntegration:
         try:
             response = self.supabase.table('source_schemas').select('*').eq('name', source_name).execute()
             if response.data:
-                return json.loads(response.data[0]['schema'])
+                schema_data = response.data[0]['schema']
+                # Check if schema_data is already a dict (no need to parse)
+                if isinstance(schema_data, dict):
+                    return schema_data
+                # If it's a string, try to parse it
+                return json.loads(schema_data) if isinstance(schema_data, str) else schema_data
             else:
                 # Fallback to default schema if not found in database
                 return self._get_default_source_schema(source_name)
@@ -93,35 +106,87 @@ class TenderTrailIntegration:
         default_schemas = {
             "adb": {
                 "source_name": "adb",
-                "title": {"type": "string", "maps_to": "title"},
-                "description": {"type": "string", "maps_to": "description"},
-                "published_date": {"type": "date", "maps_to": "date_published"},
-                "deadline": {"type": "date", "maps_to": "closing_date"},
-                "budget": {"type": "monetary", "maps_to": "tender_value"},
-                "location": {"type": "string", "maps_to": "location"},
-                "authority": {"type": "string", "maps_to": "issuing_authority"},
-                "language": "en"
-            },
-            "wb": {
-                "source_name": "wb",
-                "title": {"type": "string", "maps_to": "title"},
+                "notice_title": {"type": "string", "maps_to": "title"},
                 "description": {"type": "string", "maps_to": "description"},
                 "publication_date": {"type": "date", "maps_to": "date_published"},
-                "closing_date": {"type": "date", "maps_to": "closing_date"},
-                "value": {"type": "monetary", "maps_to": "tender_value"},
+                "due_date": {"type": "date", "maps_to": "closing_date"},
+                "contract_amount": {"type": "monetary", "maps_to": "tender_value"},
                 "country": {"type": "string", "maps_to": "location"},
-                "borrower": {"type": "string", "maps_to": "issuing_authority"},
+                "contractor": {"type": "string", "maps_to": "issuing_authority"},
+                "language": "en"
+            },
+            "afd": {
+                "source_name": "afd",
+                "notice_title": {"type": "string", "maps_to": "title"},
+                "notice_content": {"type": "string", "maps_to": "description"},
+                "publication_date": {"type": "string", "maps_to": "date_published"},
+                "deadline": {"type": "string", "maps_to": "closing_date"},
+                "country": {"type": "string", "maps_to": "location"},
+                "agency": {"type": "string", "maps_to": "issuing_authority"},
+                "language": "fr"
+            },
+            "afdb": {
+                "source_name": "afdb",
+                "title": {"type": "string", "maps_to": "title"},
+                "description": {"type": "string", "maps_to": "description"},
+                "publication_date": {"type": "string", "maps_to": "date_published"},
+                "closing_date": {"type": "date", "maps_to": "closing_date"},
+                "estimated_value": {"type": "monetary", "maps_to": "tender_value"},
+                "country": {"type": "string", "maps_to": "location"},
+                "language": "en"
+            },
+            "aiib": {
+                "source_name": "aiib",
+                "project_notice": {"type": "string", "maps_to": "title"},
+                "pdf_content": {"type": "string", "maps_to": "description"},
+                "date": {"type": "string", "maps_to": "date_published"},
+                "member": {"type": "string", "maps_to": "location"},
+                "language": "en"
+            },
+            "iadb": {
+                "source_name": "iadb",
+                "notice_title": {"type": "string", "maps_to": "title"},
+                "url_pdf": {"type": "string", "maps_to": "document_url"},
+                "publication_date": {"type": "date", "maps_to": "date_published"},
+                "pue_date": {"type": "date", "maps_to": "closing_date"},
+                "country": {"type": "string", "maps_to": "location"},
+                "language": "en"
+            },
+            "sam_gov": {
+                "source_name": "sam_gov",
+                "opportunity_title": {"type": "string", "maps_to": "title"},
+                "description": {"type": "string", "maps_to": "description"},
+                "publish_date": {"type": "timestamp", "maps_to": "date_published"},
+                "response_date": {"type": "timestamp", "maps_to": "closing_date"},
+                "place_of_performance": {"type": "jsonb", "maps_to": "location"},
+                "language": "en"
+            },
+            "ted_eu": {
+                "source_name": "ted_eu",
+                "title": {"type": "string", "maps_to": "title"},
+                "summary": {"type": "string", "maps_to": "description"},
+                "publication_date": {"type": "date", "maps_to": "date_published"},
+                "deadline_date": {"type": "date", "maps_to": "closing_date"},
+                "organisation_name": {"type": "string", "maps_to": "issuing_authority"},
                 "language": "en"
             },
             "ungm": {
                 "source_name": "ungm",
                 "title": {"type": "string", "maps_to": "title"},
                 "description": {"type": "string", "maps_to": "description"},
-                "published": {"type": "date", "maps_to": "date_published"},
-                "deadline": {"type": "date", "maps_to": "closing_date"},
-                "value": {"type": "monetary", "maps_to": "tender_value"},
+                "published_on": {"type": "string", "maps_to": "date_published"},
+                "deadline_on": {"type": "string", "maps_to": "closing_date"},
+                "beneficiary_countries": {"type": "string", "maps_to": "location"},
+                "language": "en"
+            },
+            "wb": {
+                "source_name": "wb",
+                "title": {"type": "string", "maps_to": "title"},
+                "description": {"type": "string", "maps_to": "description"},
+                "publication_date": {"type": "timestamp", "maps_to": "date_published"},
+                "deadline": {"type": "timestamp", "maps_to": "closing_date"},
                 "country": {"type": "string", "maps_to": "location"},
-                "agency": {"type": "string", "maps_to": "issuing_authority"},
+                "contact_organization": {"type": "string", "maps_to": "issuing_authority"},
                 "language": "en"
             }
         }
@@ -136,7 +201,12 @@ class TenderTrailIntegration:
         try:
             response = self.supabase.table('target_schema').select('*').execute()
             if response.data:
-                return json.loads(response.data[0]['schema'])
+                schema_data = response.data[0]['schema']
+                # Check if schema_data is already a dict (no need to parse)
+                if isinstance(schema_data, dict):
+                    return schema_data
+                # If it's a string, try to parse it
+                return json.loads(schema_data) if isinstance(schema_data, str) else schema_data
             else:
                 return self._get_default_target_schema()
         except Exception as e:
@@ -226,9 +296,29 @@ class TenderTrailIntegration:
     def _get_raw_tenders(self, source_name: str, batch_size: int) -> List[Dict[str, Any]]:
         """Get raw tenders from source table."""
         try:
+            # First, try the source_tenders table format
             table_name = f"{source_name}_tenders"
-            response = self.supabase.table(table_name).select('*').limit(batch_size).execute()
-            return response.data
+            try:
+                response = self.supabase.table(table_name).select('*').limit(batch_size).execute()
+                if response.data:
+                    return response.data
+            except Exception as e:
+                print(f"Table {table_name} not found, trying direct source table {source_name}")
+            
+            # Try direct source name as table
+            try:
+                response = self.supabase.table(source_name).select('*').eq('processed', False).limit(batch_size).execute()
+                # Mark processed records
+                if response.data:
+                    ids = [item['id'] for item in response.data if 'id' in item]
+                    if ids:
+                        self.supabase.table(source_name).update({'processed': True}).in_('id', ids).execute()
+                    return response.data
+            except Exception as e:
+                print(f"Error querying table {source_name}: {e}")
+            
+            # No valid data found
+            return []
         except Exception as e:
             print(f"Error getting raw tenders: {e}")
             return []
@@ -236,20 +326,84 @@ class TenderTrailIntegration:
     def _insert_normalized_tenders(self, normalized_tenders: List[Dict[str, Any]]) -> None:
         """Insert normalized tenders into unified table."""
         try:
+            # Ensure all fields are properly formatted
+            for tender in normalized_tenders:
+                for key, value in tender.items():
+                    if value is None:
+                        tender[key] = ""
+            
+            # Create unified_tenders table if it doesn't exist
+            try:
+                self._create_unified_tenders_table()
+            except Exception as e:
+                print(f"Error creating unified_tenders table: {e}")
+            
             response = self.supabase.table('unified_tenders').insert(normalized_tenders).execute()
             return response.data
         except Exception as e:
             print(f"Error inserting normalized tenders: {e}")
             return None
     
+    def _create_unified_tenders_table(self):
+        """Create unified_tenders table if it doesn't exist."""
+        try:
+            # Use RPC to execute SQL directly
+            sql = """
+            CREATE TABLE IF NOT EXISTS unified_tenders (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                title TEXT NOT NULL,
+                description TEXT,
+                date_published DATE,
+                closing_date DATE,
+                tender_value TEXT,
+                tender_currency TEXT,
+                location TEXT,
+                issuing_authority TEXT,
+                keywords TEXT,
+                tender_type TEXT,
+                project_size TEXT,
+                contact_information TEXT,
+                source TEXT NOT NULL,
+                raw_id TEXT,
+                processed_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+            )
+            """
+            self.supabase.rpc('exec_sql', {'sql': sql}).execute()
+        except Exception as e:
+            print(f"Error creating unified_tenders table via RPC: {e}")
+    
     def _log_errors(self, errors: List[Dict[str, Any]]) -> None:
         """Log processing errors to database."""
         try:
+            # Create errors table if it doesn't exist
+            try:
+                self._create_errors_table()
+            except Exception as e:
+                print(f"Error creating normalization_errors table: {e}")
+                
             response = self.supabase.table('normalization_errors').insert(errors).execute()
             return response.data
         except Exception as e:
             print(f"Error logging errors: {e}")
             return None
+    
+    def _create_errors_table(self):
+        """Create normalization_errors table if it doesn't exist."""
+        try:
+            # Use RPC to execute SQL directly
+            sql = """
+            CREATE TABLE IF NOT EXISTS normalization_errors (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                tender_id TEXT,
+                error TEXT,
+                source TEXT,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+            )
+            """
+            self.supabase.rpc('exec_sql', {'sql': sql}).execute()
+        except Exception as e:
+            print(f"Error creating normalization_errors table via RPC: {e}")
     
     def _get_current_timestamp(self) -> str:
         """Get current timestamp in ISO format."""

@@ -9,4 +9,12 @@ BEGIN
     AND table_name LIKE '%' || suffix
     AND table_type = 'BASE TABLE';
 END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Function to execute SQL statements dynamically (use with caution)
+CREATE OR REPLACE FUNCTION public.exec_sql(sql text)
+RETURNS void AS $$
+BEGIN
+  EXECUTE sql;
+END;
 $$ LANGUAGE plpgsql SECURITY DEFINER; 
