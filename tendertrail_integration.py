@@ -526,13 +526,13 @@ class TenderTrailIntegration:
                     "source": "unknown"
                 }
                 
-                # Optional fields 
+                # Optional fields that match the database schema 
                 optional_fields = [
                     "description", "date_published", "closing_date", 
                     "tender_value", "tender_currency", "location", 
                     "issuing_authority", "keywords", "tender_type", 
                     "project_size", "contact_information", "raw_id", 
-                    "notice_id", "deadline", "processed_at"
+                    "notice_id", "processed_at"
                 ]
                 
                 # Ensure required fields exist
@@ -544,7 +544,7 @@ class TenderTrailIntegration:
                 
                 # Add optional fields if they exist
                 for field in optional_fields:
-                    if field in tender and tender[field] is not None:
+                    if field in tender and tender[field] is not None and field not in cleaned_tender:
                         if isinstance(tender[field], (dict, list)):
                             # Convert complex objects to JSON string
                             cleaned_tender[field] = json.dumps(tender[field])[:2000]  # Truncate long JSON
@@ -891,6 +891,7 @@ class TenderTrailIntegration:
                 "title": "Untitled Tender",
                 "description": "",
                 "date_published": "",
+                "closing_date": "",
                 "location": "",
                 "issuing_authority": "",
                 "source": source_name,
@@ -910,7 +911,7 @@ class TenderTrailIntegration:
                     "location": ["location", "country", "countries", "place_of_performance", "beneficiary_countries", "nutscode", "region"],
                     "issuing_authority": ["issuing_authority", "authority", "agency", "authority_name", "organization", "buyer", "contact_organization"],
                     "notice_id": ["notice_id", "reference", "reference_number", "publication_number", "solicitation_number", "tender_id"],
-                    "deadline": ["deadline", "deadline_dt", "closing_date", "response_deadline", "submission_deadline", "end_date"]
+                    "closing_date": ["closing_date", "deadline", "deadline_dt", "response_deadline", "submission_deadline", "end_date"]
                 }
                 
                 # Try to extract values using the mappings
