@@ -57,15 +57,35 @@ async def main():
             
             for source in sources:
                 print(f"Starting normalization for source: {source}")
-                result = integration.process_source(source, batch_size)
+                # Process source returns a tuple (processed_count, error_count)
+                processed_count, error_count = integration.process_source(source, batch_size)
+                
+                # Convert to dictionary
+                result = {
+                    "source": source,
+                    "processed_count": processed_count,
+                    "error_count": error_count,
+                    "success_count": processed_count - error_count
+                }
+                
                 all_results.append(result)
-                print(f"Completed normalization for {source}. Processed {result['processed_count']} tenders.")
+                print(f"Completed normalization for {source}. Processed {processed_count} tenders.")
         else:
             # Process single source
             print(f"Starting normalization for source: {source_name}")
-            result = integration.process_source(source_name, batch_size)
+            # Process source returns a tuple (processed_count, error_count)
+            processed_count, error_count = integration.process_source(source_name, batch_size)
+            
+            # Convert to dictionary
+            result = {
+                "source": source_name,
+                "processed_count": processed_count,
+                "error_count": error_count,
+                "success_count": processed_count - error_count
+            }
+            
             all_results.append(result)
-            print(f"Normalization completed. Processed {result['processed_count']} tenders.")
+            print(f"Normalization completed. Processed {processed_count} tenders.")
         
         # Combine results
         combined_result = {

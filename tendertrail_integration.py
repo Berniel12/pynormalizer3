@@ -93,11 +93,30 @@ class TenderTrailIntegration:
             traceback.print_exc()
             raise ValueError(f"Failed to initialize TenderTrailIntegration: {e}")
     
-    def process_source(self, tenders, source_name, create_tables=True):
+    def process_source(self, tenders_or_source, source_name_or_batch_size=None, create_tables=True):
         """
         Process tenders from a source, normalize and insert them into the database.
+        This method is overloaded to handle two different call patterns:
+        
+        1. process_source(tenders, source_name, create_tables=True) - Process a list of tenders
+        2. process_source(source_name, batch_size=100, create_tables=True) - Load tenders from database
+        
+        The method automatically detects which pattern is being used based on the types of arguments.
         """
-        print(f"Processing {len(tenders)} tenders from source: {source_name}")
+        # Detect which call pattern is being used
+        if isinstance(tenders_or_source, (list, tuple)) or (isinstance(tenders_or_source, str) and source_name_or_batch_size is not None):
+            # First pattern: process_source(tenders, source_name)
+            tenders = tenders_or_source
+            source_name = source_name_or_batch_size
+            batch_size = None
+        else:
+            # Second pattern: process_source(source_name, batch_size)
+            source_name = tenders_or_source
+            batch_size = source_name_or_batch_size or 100
+            # Get tenders from database
+            tenders = self._get_raw_tenders(source_name, batch_size)
+        
+        print(f"Processing {len(tenders) if isinstance(tenders, (list, tuple)) else 'unknown number of'} tenders from source: {source_name}")
         
         try:
             # Make sure tables exist if requested
@@ -998,6 +1017,26 @@ class TenderTrailIntegration:
             
             # Convert source to string to handle numeric source names
             source = str(source)
+            
+            # Handle string tender by trying to parse it as JSON
+            if isinstance(tender, str):
+                try:
+                    # Attempt to parse as JSON
+                    import json
+                    parsed_tender = json.loads(tender)
+                    if isinstance(parsed_tender, dict):
+                        tender = parsed_tender
+                    else:
+                        # If it parsed but not into a dict, create a simple wrapper
+                        print(f"Warning: Tender from {source} is a string that parsed to {type(parsed_tender)}, wrapping it")
+                        tender = {"content": tender}
+                except json.JSONDecodeError:
+                    # Not valid JSON, create a simple wrapper
+                    print(f"Warning: Tender from {source} is a string but not valid JSON, wrapping it")
+                    tender = {"content": tender}
+                except Exception as e:
+                    print(f"Error parsing tender string: {e}")
+                    tender = {"content": tender}
             
             # Start with a base document that contains all required fields with default values
             normalized = {
