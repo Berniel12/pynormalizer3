@@ -26,7 +26,7 @@ pip install -r requirements.txt
 
 ## Dependencies
 
-- **supabase-py**: Backend database integration
+- **supabase**: Backend database integration
 - **psycopg2-binary**: PostgreSQL direct connection capabilities
 - **python-dateutil**: Advanced date parsing
 - **deep-translator** (optional): Translation of tender content to English
