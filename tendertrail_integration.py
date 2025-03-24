@@ -31,14 +31,20 @@ class TenderTrailIntegration:
     
     def process_source(self, source_name: str, batch_size: int = 100) -> Dict[str, Any]:
         """Process tenders from a specific source."""
+        print(f"Starting processing for source: {source_name}")
+        
         # Get source schema
         source_schema = self._get_source_schema(source_name)
+        print(f"Retrieved source schema for {source_name}")
         
         # Get target schema
         target_schema = self._get_target_schema()
+        print(f"Retrieved target schema")
         
         # Get raw tenders from source table
+        print(f"Fetching raw tenders for {source_name}")
         raw_tenders = self._get_raw_tenders(source_name, batch_size)
+        print(f"Found {len(raw_tenders)} raw tenders to process")
         
         # Process each tender
         processed_count = 0
@@ -84,14 +90,26 @@ class TenderTrailIntegration:
                 print(f"Error processing tender {tender_id}: {e}")
             
             processed_count += 1
+            # Print progress every 10 tenders
+            if processed_count % 10 == 0:
+                print(f"Processed {processed_count}/{len(raw_tenders)} tenders, {success_count} successful, {error_count} errors")
         
         # Insert normalized tenders into unified table
         if normalized_tenders:
+            print(f"Inserting {len(normalized_tenders)} normalized tenders")
             self._insert_normalized_tenders(normalized_tenders)
+        else:
+            print("No normalized tenders to insert")
         
         # Log errors
         if errors:
+            print(f"Logging {len(errors)} errors")
             self._log_errors(errors)
+        else:
+            print("No errors to log")
+        
+        print(f"Completed processing for source {source_name}")
+        print(f"Summary: Processed {processed_count}, Success {success_count}, Errors {error_count}")
         
         return {
             'source_name': source_name,
@@ -340,36 +358,41 @@ class TenderTrailIntegration:
     def _create_target_schema_table(self) -> None:
         """Create target_schema table if it doesn't exist and insert default schema."""
         try:
-            # Try to use REST API first before falling back to RPC
+            # Check if table already exists first to avoid unnecessary SQL calls
             try:
-                sql = """
-                CREATE TABLE IF NOT EXISTS target_schema (
-                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    schema JSONB NOT NULL,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
-                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
-                )
-                """
-                # Try direct SQL first through RPC
-                try:
-                    self.supabase.rpc('exec_sql', {'sql': sql}).execute()
-                except Exception as e:
-                    print(f"RPC method failed, falling back to direct query: {e}")
-                    # If RPC fails, try running the SQL through a custom function
-                    self._run_sql_directly(sql)
-                
-                # Check if there's data in the table
-                response = self.supabase.table('target_schema').select('*').execute()
-                if not response.data:
-                    # Insert default schema
-                    default_schema = self._get_default_target_schema()
-                    self.supabase.table('target_schema').insert({
-                        'schema': default_schema
-                    }).execute()
+                # Use the correct method to access the table
+                response = self.supabase.table('target_schema').select('id').limit(1).execute()
+                if hasattr(response, 'data'):
+                    print("target_schema table already exists")
+                    return
             except Exception as e:
-                print(f"Error creating target_schema table: {e}")
+                print(f"target_schema table check failed: {e}")
+                # Table probably doesn't exist, proceed with creation
+                pass
+                
+            # Try to use REST API first before falling back to RPC
+            sql = """
+            CREATE TABLE IF NOT EXISTS target_schema (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                schema JSONB NOT NULL,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+            )
+            """
+            # Try direct SQL first through RPC
+            try:
+                print("Attempting to create target_schema table via RPC")
+                self.supabase.rpc('exec_sql', {'sql': sql}).execute()
+                print("Successfully created target_schema table via RPC")
+            except Exception as e:
+                print(f"RPC method failed, skipping table creation: {e}")
+                # Don't attempt direct SQL to avoid hanging
+            
+            # Skip checking the table and inserting default schema to avoid further API calls
+            print("Skipping target_schema population to avoid hanging")
         except Exception as e:
             print(f"Error in _create_target_schema_table: {e}")
+            print("Continuing without table creation")
     
     def _get_raw_tenders(self, source_name: str, batch_size: int) -> List[Dict[str, Any]]:
         """Get raw tenders from source table."""
@@ -486,6 +509,18 @@ class TenderTrailIntegration:
     def _create_unified_tenders_table(self):
         """Create unified_tenders table if it doesn't exist."""
         try:
+            # Check if table already exists first to avoid unnecessary SQL calls
+            try:
+                # Use the correct method to access the table
+                response = self.supabase.table('unified_tenders').select('id').limit(1).execute()
+                if hasattr(response, 'data'):
+                    print("unified_tenders table already exists")
+                    return
+            except Exception as e:
+                print(f"unified_tenders table check failed: {e}")
+                # Table probably doesn't exist, proceed with creation
+                pass
+                
             sql = """
             CREATE TABLE IF NOT EXISTS unified_tenders (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -509,25 +544,45 @@ class TenderTrailIntegration:
             """
             # Try direct SQL first through RPC
             try:
+                print("Attempting to create unified_tenders table via RPC")
                 self.supabase.rpc('exec_sql', {'sql': sql}).execute()
+                print("Successfully created unified_tenders table via RPC")
             except Exception as e:
-                print(f"RPC method failed, falling back to direct query: {e}")
-                # If RPC fails, try running the SQL through a custom function
-                self._run_sql_directly(sql)
+                print(f"RPC method failed, skipping table creation: {e}")
+                # Don't attempt direct SQL to avoid hanging
         except Exception as e:
             print(f"Error creating unified_tenders table: {e}")
+            print("Continuing without table creation")
     
     def _log_errors(self, errors: List[Dict[str, Any]]) -> None:
         """Log processing errors to database."""
+        if not errors:
+            print("No errors to log")
+            return None
+            
         try:
-            # Create errors table if it doesn't exist
-            try:
-                self._create_errors_table()
-            except Exception as e:
-                print(f"Error creating normalization_errors table: {e}")
+            print(f"Preparing to log {len(errors)} errors")
+            
+            # Skip table creation to avoid hanging
+            # self._create_errors_table()
+            
+            # Truncate very long error messages to avoid DB issues
+            for error in errors:
+                if 'error' in error and isinstance(error['error'], str) and len(error['error']) > 1000:
+                    error['error'] = error['error'][:997] + '...'
                 
-            response = self.supabase.table('normalization_errors').insert(errors).execute()
-            return response.data
+            try:    
+                print("Inserting errors into normalization_errors table")
+                response = self.supabase.table('normalization_errors').insert(errors).execute()
+                print(f"Successfully logged {len(errors)} errors")
+                return response.data
+            except Exception as e:
+                print(f"Failed to log errors to database: {e}")
+                # Print the first few errors to console as fallback
+                print("Sample errors:")
+                for i, error in enumerate(errors[:5]):
+                    print(f"  Error {i+1}: {error.get('tender_id', 'unknown')} - {error.get('error', 'unknown')}")
+                return None
         except Exception as e:
             print(f"Error logging errors: {e}")
             return None
@@ -535,6 +590,18 @@ class TenderTrailIntegration:
     def _create_errors_table(self):
         """Create normalization_errors table if it doesn't exist."""
         try:
+            # Check if table already exists first to avoid unnecessary SQL calls
+            try:
+                # Use the correct method to access the table
+                response = self.supabase.table('normalization_errors').select('id').limit(1).execute()
+                if hasattr(response, 'data'):
+                    print("normalization_errors table already exists")
+                    return
+            except Exception as e:
+                print(f"normalization_errors table check failed: {e}")
+                # Table probably doesn't exist, proceed with creation
+                pass
+                
             sql = """
             CREATE TABLE IF NOT EXISTS normalization_errors (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -546,13 +613,15 @@ class TenderTrailIntegration:
             """
             # Try direct SQL first through RPC
             try:
+                print("Attempting to create normalization_errors table via RPC")
                 self.supabase.rpc('exec_sql', {'sql': sql}).execute()
+                print("Successfully created normalization_errors table via RPC")
             except Exception as e:
-                print(f"RPC method failed, falling back to direct query: {e}")
-                # If RPC fails, try running the SQL through a custom function
-                self._run_sql_directly(sql)
+                print(f"RPC method failed, skipping table creation: {e}")
+                # Don't attempt direct SQL to avoid hanging
         except Exception as e:
             print(f"Error creating normalization_errors table: {e}")
+            print("Continuing without table creation")
     
     def _get_current_timestamp(self) -> str:
         """Get current timestamp in ISO format."""
@@ -591,7 +660,7 @@ class TenderTrailIntegration:
                     url = self.supabase.rest_url
                 
                 if not url:
-                    print("Unable to find URL attribute in Supabase client")
+                    print("Unable to find URL attribute in Supabase client, skipping direct SQL execution")
                     return
                 
                 # Try to get key from different possible attributes
@@ -604,19 +673,34 @@ class TenderTrailIntegration:
                     key = self.supabase.supabase_key
                 
                 if not key:
-                    print("Unable to find key attribute in Supabase client")
+                    print("Unable to find key attribute in Supabase client, skipping direct SQL execution")
                     return
                 
                 # Parse URL to get host
                 parsed_url = urlparse(url)
-                host = parsed_url.netloc.split('.')[0]
                 
-                # Connect directly to PostgreSQL
+                # Check if the URL is valid
+                if not parsed_url.netloc:
+                    print(f"Invalid Supabase URL format: {url}, skipping direct SQL execution")
+                    return
+                
+                host_parts = parsed_url.netloc.split('.')
+                if len(host_parts) < 2:
+                    print(f"Cannot extract project ID from URL: {url}, skipping direct SQL execution")
+                    return
+                
+                host = host_parts[0]
+                
+                # Connect directly to PostgreSQL with timeout
+                print(f"Attempting direct database connection to {host}.supabase.co")
+                
+                # Add connection timeout to prevent hanging
                 conn = psycopg2.connect(
                     host=f"{host}.supabase.co",
                     database="postgres",
                     user="postgres",
-                    password=key
+                    password=key,
+                    connect_timeout=10  # 10 second timeout
                 )
                 
                 # Execute SQL
@@ -624,10 +708,13 @@ class TenderTrailIntegration:
                     cur.execute(sql)
                 conn.commit()
                 conn.close()
+                print(f"Successfully executed SQL directly")
             except Exception as e:
                 print(f"Error connecting to database: {e}")
+                print("Continuing without table creation")
         except Exception as e:
             print(f"Failed to run SQL directly: {e}")
+            print("Continuing without table creation")
             
     def _get_default_target_schema(self) -> Dict[str, Any]:
         """Get default target schema."""
