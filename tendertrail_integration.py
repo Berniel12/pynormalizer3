@@ -11,83 +11,36 @@ class TenderTrailIntegration:
     
     def __init__(self, normalizer, preprocessor, supabase_url, supabase_key, skip_direct_connections=False):
         """
-        Initialize the integration layer.
+        Initialize the TenderTrail integration.
         
         Args:
-            normalizer: The tender normalizer to use
-            preprocessor: The tender preprocessor to use
-            supabase_url: Supabase project URL
-            supabase_key: Supabase API key
-            skip_direct_connections: Set to True to avoid direct PostgreSQL connections (default in Docker)
+            normalizer: The normalizer instance to use
+            preprocessor: The preprocessor instance to use
+            supabase_url: URL of the Supabase project
+            supabase_key: API key for the Supabase project
+            skip_direct_connections: Whether to skip direct PostgreSQL connections (default: False)
         """
         try:
             self.normalizer = normalizer
             self.preprocessor = preprocessor
+            self.supabase_url = supabase_url
+            self.supabase_key = supabase_key
             self.skip_direct_connections = skip_direct_connections
-            
-            # Detect Docker environment
-            in_docker = False
-            try:
-                with open('/proc/1/cgroup', 'rt') as f:
-                    if 'docker' in f.read():
-                        in_docker = True
-            except:
-                pass
-            
-            # Auto-enable API-only mode in Docker
-            if in_docker and not skip_direct_connections:
-                print("Docker environment detected - automatically enabling API-only mode")
-                self.skip_direct_connections = True
-            
-            if self.skip_direct_connections:
-                print("="*80)
-                print("INITIALIZING TENDERTRAIL INTEGRATION IN API-ONLY MODE")
-                print("Direct PostgreSQL connections will be disabled")
-                print("This mode is optimized for Docker and cloud environments")
-                print("="*80)
             
             # Initialize Supabase client
             try:
-                self.supabase = create_client(supabase_url, supabase_key)
+                self.supabase: Client = create_client(supabase_url, supabase_key)
                 print("Successfully initialized Supabase client")
             except Exception as e:
                 print(f"Error initializing Supabase client: {e}")
                 raise ValueError(f"Failed to initialize Supabase client: {e}")
             
-            # Try to install psycopg2 if it's missing and we're not in API-only mode
-            if not self.skip_direct_connections:
-                try:
-                    import psycopg2
-                except ImportError:
-                    print("Installing psycopg2-binary...")
-                    try:
-                        subprocess.check_call([sys.executable, "-m", "pip", "install", "psycopg2-binary"])
-                        print("psycopg2-binary installed successfully")
-                    except Exception as e:
-                        print(f"Failed to install psycopg2-binary: {e}")
-                        print("Continuing without direct PostgreSQL support")
-                        self.skip_direct_connections = True
+            # Initialize translation cache
+            self.translation_cache = {}
             
-            # Ensure we're connected to Supabase
-            try:
-                # Simple test query to verify connection
-                self.supabase.table('unified_tenders').select('id').limit(1).execute()
-                print("Verified Supabase connection is working")
-            except Exception as e:
-                print(f"Warning: Could not verify Supabase connection: {e}")
-                print("Will continue initialization but some operations may fail")
+            # Initialize schema cache
+            self.target_schema = None
             
-            # Try to create exec_sql function if it doesn't exist
-            self._create_exec_sql_function()
-            
-            # Ensure required tables exist
-            try:
-                self._create_unified_tenders_table()
-                self._create_errors_table()
-                self._create_target_schema_table()
-            except Exception as e:
-                print(f"Warning: Error during table initialization: {e}")
-                print("Will continue with limited functionality")
         except Exception as e:
             print(f"Error in __init__: {e}")
             traceback.print_exc()
@@ -119,12 +72,6 @@ class TenderTrailIntegration:
         print(f"Processing {len(tenders) if isinstance(tenders, (list, tuple)) else 'unknown number of'} tenders from source: {source_name}")
         
         try:
-            # Make sure tables exist if requested
-            if create_tables:
-                self._create_unified_tenders_table()
-                self._create_errors_table()
-                self._create_target_schema_table()
-            
             # Exit early if no tenders
             if not tenders:
                 print(f"No tenders to process for source: {source_name}")
@@ -1609,37 +1556,13 @@ class TenderTrailIntegration:
             print(f"Error in _create_errors_table: {e}")
 
     def _insert_error(self, source: str, error_type: str, error_message: str, tender_data: str = "") -> None:
-        """Insert an error record into the normalization_errors table."""
+        """Log an error to the console."""
         try:
-            # In API-only mode, we'll first try to insert the error directly
-            # without attempting to create the table via SQL
-            
             # Truncate tender_data if it's too long
             if tender_data and len(tender_data) > 10000:
                 tender_data = tender_data[:10000] + "... [truncated]"
             
-            # Create error record
-            error_record = {
-                'source': source,
-                'error_type': error_type,
-                'error_message': error_message[:2000],  # Truncate if needed
-                'tender_data': tender_data
-            }
-            
-            # First try direct insert - table might exist already
-            try:
-                response = self.supabase.table('normalization_errors').insert(error_record).execute()
-                if hasattr(response, 'data'):
-                    print(f"Inserted error record for {source}: {error_type}")
-                    return
-            except Exception as e:
-                # If error table doesn't exist or permissions don't allow insert
-                if "relation" in str(e) and "does not exist" in str(e):
-                    print("normalization_errors table doesn't exist - errors will be logged to console only")
-                else:
-                    print(f"Error inserting error record: {e}")
-            
-            # Just log to console if we can't insert into the database
+            # Log to console
             print(f"ERROR RECORD [{source}] - Type: {error_type}")
             print(f"ERROR MESSAGE: {error_message[:200]}")
             if tender_data:
