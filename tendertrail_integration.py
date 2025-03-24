@@ -3,6 +3,8 @@ import sys
 import subprocess
 from typing import Dict, Any, List, Optional
 from supabase import create_client, Client
+import uuid
+import traceback
 
 class TenderTrailIntegration:
     """Integration layer for TenderTrail normalization workflow."""
@@ -24,105 +26,140 @@ class TenderTrailIntegration:
             except Exception as e:
                 print(f"Failed to install psycopg2-binary: {e}")
         
+        # Try to create exec_sql function if it doesn't exist
+        self._create_exec_sql_function()
+        
         # Ensure required tables exist
         self._create_unified_tenders_table()
         self._create_errors_table()
         self._create_target_schema_table()
     
-    def process_source(self, source_name: str, batch_size: int = 100) -> Dict[str, Any]:
-        """Process tenders from a specific source."""
-        print(f"Starting processing for source: {source_name}")
+    def process_source(self, tenders, source_name, create_tables=True):
+        """
+        Process tenders from a source, normalize and insert them into the database.
+        """
+        print(f"Processing {len(tenders)} tenders from source: {source_name}")
         
-        # Get source schema
-        source_schema = self._get_source_schema(source_name)
-        print(f"Retrieved source schema for {source_name}")
-        
-        # Get target schema
-        target_schema = self._get_target_schema()
-        print(f"Retrieved target schema")
-        
-        # Get raw tenders from source table
-        print(f"Fetching raw tenders for {source_name}")
-        raw_tenders = self._get_raw_tenders(source_name, batch_size)
-        print(f"Found {len(raw_tenders)} raw tenders to process")
-        
-        # Process each tender
-        processed_count = 0
-        success_count = 0
-        error_count = 0
-        normalized_tenders = []
-        errors = []
-        
-        for raw_tender in raw_tenders:
-            try:
-                # Ensure the tender is a dictionary
-                tender = self._ensure_dict(raw_tender)
-                
-                # Debug what we're getting
-                if processed_count < 3 or processed_count % 50 == 0:
-                    print(f"Processing tender type: {type(tender)}, Sample: {str(tender)[:100]}")
-                
-                # Directly use the robust normalize_tender method
-                normalized_tender = self._normalize_tender(tender, source_name, processed_count)
-                
-                # Add to batch
-                normalized_tenders.append(normalized_tender)
-                success_count += 1
-                
-            except Exception as e:
-                error_count += 1
-                # Safely extract tender_id for error logging
-                tender_id = self._extract_tender_id(raw_tender, processed_count)
-                
-                errors.append({
-                    'tender_id': str(tender_id),
-                    'error': str(e),
-                    'source': source_name
-                })
-                print(f"Error processing tender {tender_id}: {e}")
-                
-                # Even when an error occurs, try to add a minimal record
-                try:
-                    minimal_tender = {
-                        "title": f"Error Processing Tender {tender_id}",
-                        "description": f"Error during processing: {str(e)}",
-                        "source": source_name,
-                        "raw_id": str(tender_id),
-                        "processed_at": self._get_current_timestamp()
-                    }
-                    normalized_tenders.append(minimal_tender)
-                    print(f"Added minimal record for tender {tender_id}")
-                except:
-                    print(f"Failed to add minimal record for tender {tender_id}")
+        try:
+            # Make sure tables exist if requested
+            if create_tables:
+                self._create_unified_tenders_table()
+                self._create_errors_table()
+                self._create_target_schema_table()
             
-            processed_count += 1
-            # Print progress every 10 tenders
-            if processed_count % 10 == 0:
-                print(f"Processed {processed_count}/{len(raw_tenders)} tenders, {success_count} successful, {error_count} errors")
+            # Exit early if no tenders
+            if not tenders:
+                print(f"No tenders to process for source: {source_name}")
+                return 0, 0
+            
+            # Track statistics
+            processed_count = 0
+            error_count = 0
+            normalized_tenders = []
+            
+            # Process each tender
+            for tender in tenders:
+                try:
+                    # First attempt direct normalization (preferred for known source formats)
+                    normalized_tender = self._normalize_tender(tender, source_name)
+                    
+                    # If we got a valid normalized tender, use it
+                    if normalized_tender and isinstance(normalized_tender, dict) and normalized_tender.get("notice_title"):
+                        normalized_tenders.append(normalized_tender)
+                        processed_count += 1
+                        continue
+                    
+                    # If direct normalization failed, try the standard process with preprocessor and normalizer
+                    if self.preprocessor and self.normalizer:
+                        # Preprocess the tender
+                        preprocessed_tender = self.preprocessor.preprocess_tender(tender)
+                        
+                        # Normalize the preprocessed tender
+                        normalized_tender = self.normalizer.normalize_tender(preprocessed_tender)
+                        
+                        # Add to the list of normalized tenders
+                        normalized_tenders.append(normalized_tender)
+                        processed_count += 1
+                    else:
+                        # If no preprocessor or normalizer, create a minimal record
+                        print("Warning: No preprocessor or normalizer available, creating minimal record")
+                        minimal_tender = {
+                            "notice_id": str(uuid.uuid4()),
+                            "notice_type": "Default",
+                            "notice_title": f"Untitled Tender from {source_name}",
+                            "description": "No preprocessor or normalizer available",
+                            "source": source_name,
+                            "country": "",
+                            "location": "",
+                            "issuing_authority": source_name,
+                            "date_published": None,
+                            "closing_date": None
+                        }
+                        normalized_tenders.append(minimal_tender)
+                        processed_count += 1
+                except Exception as e:
+                    error_message = f"Error processing tender from {source_name}: {e}"
+                    print(error_message)
+                    error_count += 1
+                    
+                    # Create error record
+                    self._insert_error(source_name, "processing_error", error_message, str(tender) if tender else "")
+            
+            # Insert all normalized tenders into the database
+            if normalized_tenders:
+                insert_count = self._insert_normalized_tenders(normalized_tenders)
+                print(f"Inserted {insert_count} tenders from source: {source_name}")
+            else:
+                print(f"No tenders were successfully normalized for source: {source_name}")
+            
+            return processed_count, error_count
+        except Exception as e:
+            print(f"Error processing source {source_name}: {e}")
+            traceback.print_exc()
+            return 0, 0
+    
+    def process_json_tenders(self, json_data, source_name):
+        """
+        Process tenders from JSON data for a specific source.
+        This is a simpler entry point that doesn't require database tables for raw tenders.
         
-        # Insert normalized tenders into unified table
-        if normalized_tenders:
-            print(f"Inserting {len(normalized_tenders)} normalized tenders")
-            self._insert_normalized_tenders(normalized_tenders)
-        else:
-            print("No normalized tenders to insert")
+        Args:
+            json_data: List of tender dictionaries or a dictionary containing a list
+            source_name: Name of the source (e.g., 'afd', 'ungm', 'sam_gov')
+            
+        Returns:
+            Tuple (processed_count, error_count)
+        """
+        try:
+            print(f"Processing JSON data for source: {source_name}")
+            
+            # Handle different input structures
+            tenders = []
+            if isinstance(json_data, list):
+                tenders = json_data
+            elif isinstance(json_data, dict):
+                # Try to find a list in the dictionary
+                for key, value in json_data.items():
+                    if isinstance(value, list) and value:
+                        tenders = value
+                        print(f"Found tenders list in key: {key}")
+                        break
+                
+                if not tenders and "data" in json_data and json_data["data"]:
+                    tenders = [json_data["data"]]
+                    print("Using 'data' field as a single tender")
+            else:
+                print(f"Unsupported JSON data type: {type(json_data)}")
+                return 0, 0
+            
+            # Process the tenders
+            print(f"Found {len(tenders)} tenders to process for source: {source_name}")
+            return self.process_source(tenders, source_name)
         
-        # Log errors
-        if errors:
-            print(f"Logging {len(errors)} errors")
-            self._log_errors(errors)
-        else:
-            print("No errors to log")
-        
-        print(f"Completed processing for source {source_name}")
-        print(f"Summary: Processed {processed_count}, Success {success_count}, Errors {error_count}")
-        
-        return {
-            'source_name': source_name,
-            'processed_count': processed_count,
-            'success_count': success_count,
-            'error_count': error_count
-        }
+        except Exception as e:
+            print(f"Error processing JSON data for source {source_name}: {e}")
+            traceback.print_exc()
+            return 0, 0
     
     def _ensure_dict(self, data: Any) -> Dict[str, Any]:
         """Ensure that data is a dictionary."""
@@ -345,60 +382,121 @@ class TenderTrailIntegration:
     def _get_target_schema(self) -> Dict[str, Any]:
         """Get target schema from database or config."""
         try:
-            response = self.supabase.table('target_schema').select('*').execute()
-            if response.data:
-                schema_data = response.data[0]['schema']
-                # Check if schema_data is already a dict (no need to parse)
-                if isinstance(schema_data, dict):
-                    return schema_data
-                # If it's a string, try to parse it
-                return json.loads(schema_data) if isinstance(schema_data, str) else schema_data
-            else:
-                return self._get_default_target_schema()
+            # Try to get from database, but don't error if not available
+            try:
+                response = self.supabase.table('target_schema').select('*').execute()
+                if response.data:
+                    schema_data = response.data[0]['schema']
+                    # Check if schema_data is already a dict (no need to parse)
+                    if isinstance(schema_data, dict):
+                        print("Retrieved target schema from database")
+                        return schema_data
+                    # If it's a string, try to parse it
+                    parsed_schema = json.loads(schema_data) if isinstance(schema_data, str) else schema_data
+                    print("Retrieved and parsed target schema from database")
+                    return parsed_schema
+                else:
+                    print("No schema found in target_schema table, using default")
+                    # Try to create target schema table if empty
+                    try:
+                        self._create_target_schema_table()
+                    except Exception as create_e:
+                        print(f"Failed to create target schema: {create_e}")
+                    # Return default schema
+                    return self._get_default_target_schema()
+            except Exception as e:
+                print(f"Error getting target schema from database: {e}")
+                # Try to create the target schema table
+                try: 
+                    self._create_target_schema_table()
+                except Exception as create_e:
+                    print(f"Failed to create target schema table: {create_e}")
+                
+                # Fall back to default schema
+                default_schema = self._get_default_target_schema()
+                print("Using default target schema")
+                return default_schema
         except Exception as e:
-            print(f"Error getting target schema: {e}")
-            # Create target schema table if it doesn't exist
-            self._create_target_schema_table()
+            print(f"General error in _get_target_schema: {e}")
             return self._get_default_target_schema()
     
     def _create_target_schema_table(self) -> None:
         """Create target_schema table if it doesn't exist and insert default schema."""
         try:
-            # Check if table already exists first to avoid unnecessary SQL calls
+            # Check if table already exists using simple query
             try:
-                # Use the correct method to access the table
-                response = self.supabase.table('target_schema').select('id').limit(1).execute()
-                if hasattr(response, 'data'):
-                    print("target_schema table already exists")
-                    return
+                try:
+                    # Try direct query
+                    response = self.supabase.table('target_schema').select('id').limit(1).execute()
+                    if hasattr(response, 'data'):
+                        print("target_schema table already exists")
+                        
+                        # If the table exists but is empty, try to populate it
+                        if not response.data:
+                            try:
+                                print("Adding default schema to empty target_schema table")
+                                default_schema = self._get_default_target_schema()
+                                self.supabase.table('target_schema').insert({
+                                    'schema': default_schema
+                                }).execute()
+                                print("Successfully added default schema to target_schema")
+                            except Exception as e:
+                                print(f"Error adding default schema: {e}")
+                        
+                        return
+                except Exception as e:
+                    # If the error indicates the table doesn't exist, try to create it
+                    if "relation" in str(e) and "does not exist" in str(e):
+                        print(f"target_schema table doesn't exist, creating it: {e}")
+                    else:
+                        print(f"target_schema table check failed: {e}")
+                        
+                # Try to create the table without RPC first
+                try:
+                    # We will directly try a simple INSERT
+                    print("Creating target_schema table via direct table create")
+                    default_schema = self._get_default_target_schema()
+                    
+                    # Try to create a minimal schema with select, upsert, and delete
+                    create_table_sql = """
+                    CREATE TABLE IF NOT EXISTS public.target_schema (
+                        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        schema JSONB NOT NULL,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+                        updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+                    );
+                    """
+                    
+                    # Try to execute the create table via other functions if available
+                    for function_name in ['exec_sql', 'run_sql', 'execute_sql']:
+                        try:
+                            print(f"Attempting to create table via '{function_name}' RPC")
+                            self.supabase.rpc(function_name, {'sql': create_table_sql}).execute()
+                            print(f"Successfully created table via '{function_name}'")
+                            # If successful, try to insert default schema
+                            try:
+                                self.supabase.table('target_schema').insert({
+                                    'schema': default_schema
+                                }).execute()
+                                print("Successfully added default schema")
+                            except Exception as insert_e:
+                                print(f"Failed to insert default schema: {insert_e}")
+                            return
+                        except Exception as fn_e:
+                            print(f"Function '{function_name}' failed: {fn_e}")
+                    
+                    # If we get here, table creation methods failed
+                    print("Could not create target_schema table, continuing with in-memory schema")
+                except Exception as create_e:
+                    print(f"Error creating target_schema table: {create_e}")
             except Exception as e:
-                print(f"target_schema table check failed: {e}")
-                # Table probably doesn't exist, proceed with creation
-                pass
-                
-            # Try to use REST API first before falling back to RPC
-            sql = """
-            CREATE TABLE IF NOT EXISTS target_schema (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                schema JSONB NOT NULL,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
-                updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
-            )
-            """
-            # Try direct SQL first through RPC
-            try:
-                print("Attempting to create target_schema table via RPC")
-                self.supabase.rpc('exec_sql', {'sql': sql}).execute()
-                print("Successfully created target_schema table via RPC")
-            except Exception as e:
-                print(f"RPC method failed, skipping table creation: {e}")
-                # Don't attempt direct SQL to avoid hanging
+                print(f"Error checking target_schema: {e}")
             
-            # Skip checking the table and inserting default schema to avoid further API calls
-            print("Skipping target_schema population to avoid hanging")
-        except Exception as e:
-            print(f"Error in _create_target_schema_table: {e}")
-            print("Continuing without table creation")
+            # We'll continue with the in-memory default schema
+            print("Using in-memory default schema")
+        except Exception as general_e:
+            print(f"General error in _create_target_schema_table: {general_e}")
+            print("Continuing with in-memory schema")
     
     def _get_raw_tenders(self, source_name: str, batch_size: int) -> List[Dict[str, Any]]:
         """Get raw tenders from source table."""
@@ -666,49 +764,60 @@ class TenderTrailIntegration:
     def _create_unified_tenders_table(self):
         """Create unified_tenders table if it doesn't exist."""
         try:
-            # Check if table already exists first to avoid unnecessary SQL calls
+            # Check if table already exists using simple query
             try:
-                # Use the correct method to access the table
-                response = self.supabase.table('unified_tenders').select('id').limit(1).execute()
-                if hasattr(response, 'data'):
-                    print("unified_tenders table already exists")
-                    return
-            except Exception as e:
-                print(f"unified_tenders table check failed: {e}")
-                # Table probably doesn't exist, proceed with creation
-                pass
+                try:
+                    # Try direct query
+                    response = self.supabase.table('unified_tenders').select('id').limit(1).execute()
+                    if hasattr(response, 'data'):
+                        print("unified_tenders table already exists")
+                        return
+                except Exception as e:
+                    # If the error indicates the table doesn't exist, try to create it
+                    if "relation" in str(e) and "does not exist" in str(e):
+                        print(f"unified_tenders table doesn't exist, creating it: {e}")
+                    else:
+                        print(f"unified_tenders table check failed: {e}")
                 
-            sql = """
-            CREATE TABLE IF NOT EXISTS unified_tenders (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                title TEXT NOT NULL,
-                description TEXT,
-                date_published DATE,
-                closing_date DATE,
-                tender_value TEXT,
-                tender_currency TEXT,
-                location TEXT,
-                issuing_authority TEXT,
-                keywords TEXT,
-                tender_type TEXT,
-                project_size TEXT,
-                contact_information TEXT,
-                source TEXT NOT NULL,
-                raw_id TEXT,
-                processed_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
-            )
-            """
-            # Try direct SQL first through RPC
-            try:
-                print("Attempting to create unified_tenders table via RPC")
-                self.supabase.rpc('exec_sql', {'sql': sql}).execute()
-                print("Successfully created unified_tenders table via RPC")
-            except Exception as e:
-                print(f"RPC method failed, skipping table creation: {e}")
-                # Don't attempt direct SQL to avoid hanging
-        except Exception as e:
-            print(f"Error creating unified_tenders table: {e}")
+                # Create table using RPC if available
+                create_table_sql = """
+                CREATE TABLE IF NOT EXISTS public.unified_tenders (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    title TEXT NOT NULL,
+                    description TEXT,
+                    date_published DATE,
+                    closing_date DATE,
+                    tender_value TEXT,
+                    tender_currency TEXT,
+                    location TEXT,
+                    issuing_authority TEXT,
+                    keywords TEXT,
+                    tender_type TEXT,
+                    project_size TEXT,
+                    contact_information TEXT,
+                    source TEXT NOT NULL,
+                    raw_id TEXT,
+                    processed_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+                )
+                """
+                
+                # Try to execute the create table via other functions if available
+                for function_name in ['exec_sql', 'run_sql', 'execute_sql']:
+                    try:
+                        print(f"Attempting to create unified_tenders table via '{function_name}' RPC")
+                        self.supabase.rpc(function_name, {'sql': create_table_sql}).execute()
+                        print(f"Successfully created unified_tenders table via '{function_name}'")
+                        return
+                    except Exception as fn_e:
+                        print(f"Function '{function_name}' failed: {fn_e}")
+                
+                # If we get here, table creation methods failed but we'll continue
+                print("Could not create unified_tenders table via RPC, will try insert anyway")
+            except Exception as check_e:
+                print(f"Error checking unified_tenders table: {check_e}")
+        except Exception as general_e:
+            print(f"General error in _create_unified_tenders_table: {general_e}")
             print("Continuing without table creation")
     
     def _log_errors(self, errors: List[Dict[str, Any]]) -> None:
@@ -747,37 +856,48 @@ class TenderTrailIntegration:
     def _create_errors_table(self):
         """Create normalization_errors table if it doesn't exist."""
         try:
-            # Check if table already exists first to avoid unnecessary SQL calls
+            # Check if table already exists using simple query
             try:
-                # Use the correct method to access the table
-                response = self.supabase.table('normalization_errors').select('id').limit(1).execute()
-                if hasattr(response, 'data'):
-                    print("normalization_errors table already exists")
-                    return
-            except Exception as e:
-                print(f"normalization_errors table check failed: {e}")
-                # Table probably doesn't exist, proceed with creation
-                pass
+                try:
+                    # Try direct query
+                    response = self.supabase.table('normalization_errors').select('id').limit(1).execute()
+                    if hasattr(response, 'data'):
+                        print("normalization_errors table already exists")
+                        return
+                except Exception as e:
+                    # If the error indicates the table doesn't exist, try to create it
+                    if "relation" in str(e) and "does not exist" in str(e):
+                        print(f"normalization_errors table doesn't exist, creating it: {e}")
+                    else:
+                        print(f"normalization_errors table check failed: {e}")
                 
-            sql = """
-            CREATE TABLE IF NOT EXISTS normalization_errors (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                tender_id TEXT,
-                error TEXT,
-                source TEXT,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
-            )
-            """
-            # Try direct SQL first through RPC
-            try:
-                print("Attempting to create normalization_errors table via RPC")
-                self.supabase.rpc('exec_sql', {'sql': sql}).execute()
-                print("Successfully created normalization_errors table via RPC")
-            except Exception as e:
-                print(f"RPC method failed, skipping table creation: {e}")
-                # Don't attempt direct SQL to avoid hanging
-        except Exception as e:
-            print(f"Error creating normalization_errors table: {e}")
+                # Create table using RPC if available
+                create_table_sql = """
+                CREATE TABLE IF NOT EXISTS public.normalization_errors (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    tender_id TEXT,
+                    error TEXT,
+                    source TEXT,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+                )
+                """
+                
+                # Try to execute the create table via other functions if available
+                for function_name in ['exec_sql', 'run_sql', 'execute_sql']:
+                    try:
+                        print(f"Attempting to create normalization_errors table via '{function_name}' RPC")
+                        self.supabase.rpc(function_name, {'sql': create_table_sql}).execute()
+                        print(f"Successfully created normalization_errors table via '{function_name}'")
+                        return
+                    except Exception as fn_e:
+                        print(f"Function '{function_name}' failed: {fn_e}")
+                
+                # If we get here, table creation methods failed but we'll continue
+                print("Could not create normalization_errors table via RPC, will try insert anyway")
+            except Exception as check_e:
+                print(f"Error checking normalization_errors table: {check_e}")
+        except Exception as general_e:
+            print(f"General error in _create_errors_table: {general_e}")
             print("Continuing without table creation")
     
     def _get_current_timestamp(self) -> str:
@@ -953,95 +1073,534 @@ class TenderTrailIntegration:
             "language": "en"
         }
 
-    def _normalize_tender(self, tender, source_name, processed_count):
-        """Normalize a tender based on source format without using preprocessor or normalizer"""
+    def _normalize_tender(self, tender, source='unknown'):
+        """
+        Normalize a tender directly, bypassing the preprocessor for known source formats.
+        This is a more direct approach that avoids errors in the preprocessor.
+        """
         try:
-            print(f"Direct normalizing tender for source: {source_name}, Type: {type(tender)}")
+            if not tender:
+                print(f"Warning: Empty tender received from source {source}")
+                return {}
             
-            # Create a base normalized tender with required fields
-            normalized_tender = {
-                "title": "Untitled Tender",
+            # Start with a base document that contains all required fields with default values
+            normalized = {
+                "notice_id": str(uuid.uuid4()),  # Default ID if none is found
+                "notice_type": "Default",
+                "notice_title": "Untitled Tender",
                 "description": "",
-                "date_published": "",
-                "closing_date": "",
+                "country": "",
                 "location": "",
-                "issuing_authority": "",
-                "source": source_name,
-                "raw_id": str(processed_count),
-                "processed_at": self._get_current_timestamp()
+                "issuing_authority": source,
+                "date_published": None,
+                "closing_date": None,
+                "currency": "",
+                "value": None,
+                "cpvs": [],
+                "buyer": "",
+                "email": "",
+                "source": source,
+                "url": "",
+                "tag": [],
+                "language": "en"
             }
             
-            # Add any data we can find from the tender
-            if isinstance(tender, dict):
-                # Common field mappings that might be in any tender
+            # Source-specific normalization logic
+            if source.lower() == 'afd':
+                # AFD specific normalization
+                print(f"Applying AFD-specific normalization for tender: {tender.get('title', 'No Title')}")
+                
+                # Notice ID - Use reference number if available, otherwise afd_id
+                if 'reference' in tender and tender['reference']:
+                    normalized["notice_id"] = tender['reference']
+                elif 'afd_id' in tender and tender['afd_id']:
+                    normalized["notice_id"] = tender['afd_id']
+                
+                # Title
+                if 'title' in tender and tender['title']:
+                    normalized["notice_title"] = tender['title']
+                
+                # Tender type
+                if 'tender_type' in tender and tender['tender_type']:
+                    normalized["notice_type"] = tender['tender_type']
+                
+                # Description
+                if 'description' in tender and tender['description']:
+                    normalized["description"] = tender['description']
+                
+                # Country
+                if 'country' in tender and tender['country']:
+                    normalized["country"] = tender['country']
+                
+                # Set issuing authority specifically for AFD
+                normalized["issuing_authority"] = "Agence Française de Développement"
+                
+                # Dates
+                if 'published_date' in tender and tender['published_date']:
+                    normalized["date_published"] = self._parse_date(tender['published_date'])
+                
+                if 'closing_date' in tender and tender['closing_date']:
+                    normalized["closing_date"] = self._parse_date(tender['closing_date'])
+                
+                # URL
+                if 'url' in tender and tender['url']:
+                    normalized["url"] = tender['url']
+                
+                # Include any additional fields as metadata
+                metadata = {}
+                for k, v in tender.items():
+                    if k not in normalized and v is not None:
+                        metadata[k] = str(v) if not isinstance(v, (str, int, float, bool, type(None))) else v
+                
+                # If we have metadata, add it to the normalized tender
+                if metadata:
+                    normalized["metadata"] = json.dumps(metadata)
+                
+            elif source.lower() == 'sam_gov':
+                # SAM.gov specific normalization
+                print(f"Applying SAM.gov-specific normalization for tender: {tender.get('title', 'No Title')}")
+                
+                # Notice ID
+                if 'notice_id' in tender and tender['notice_id']:
+                    normalized["notice_id"] = tender['notice_id']
+                
+                # Title
+                if 'title' in tender and tender['title']:
+                    normalized["notice_title"] = tender['title']
+                
+                # Type
+                if 'type' in tender and tender['type']:
+                    normalized["notice_type"] = tender['type']
+                
+                # Description
+                if 'description' in tender and tender['description']:
+                    normalized["description"] = tender['description']
+                
+                # Issuing authority
+                if 'agency' in tender and tender['agency']:
+                    normalized["issuing_authority"] = tender['agency']
+                
+                # Dates
+                if 'posted_date' in tender and tender['posted_date']:
+                    normalized["date_published"] = self._parse_date(tender['posted_date'])
+                
+                if 'response_deadline' in tender and tender['response_deadline']:
+                    normalized["closing_date"] = self._parse_date(tender['response_deadline'])
+                
+                # URL
+                if 'url' in tender and tender['url']:
+                    normalized["url"] = tender['url']
+                
+                # Location/Country
+                if 'location' in tender and tender['location']:
+                    normalized["location"] = tender['location']
+                    # Try to extract country from location
+                    if ',' in tender['location']:
+                        parts = tender['location'].split(',')
+                        if len(parts) > 1:
+                            normalized["country"] = parts[-1].strip()
+                
+                # Include any additional fields as metadata
+                metadata = {}
+                for k, v in tender.items():
+                    if k not in normalized and v is not None:
+                        metadata[k] = str(v) if not isinstance(v, (str, int, float, bool, type(None))) else v
+                
+                # If we have metadata, add it to the normalized tender
+                if metadata:
+                    normalized["metadata"] = json.dumps(metadata)
+                
+            elif source.lower() == 'ungm':
+                # UNGM specific normalization
+                print(f"Applying UNGM-specific normalization for tender: {tender.get('title', 'No Title')}")
+                
+                # Notice ID
+                if 'reference' in tender and tender['reference']:
+                    normalized["notice_id"] = tender['reference']
+                
+                # Title
+                if 'title' in tender and tender['title']:
+                    normalized["notice_title"] = tender['title']
+                
+                # Type
+                if 'type' in tender and tender['type']:
+                    normalized["notice_type"] = tender['type']
+                
+                # Description
+                if 'description' in tender and tender['description']:
+                    normalized["description"] = tender['description']
+                
+                # Issuing authority
+                if 'agency' in tender and tender['agency']:
+                    normalized["issuing_authority"] = tender['agency']
+                
+                # Country
+                if 'country' in tender and tender['country']:
+                    normalized["country"] = tender['country']
+                
+                # Dates
+                if 'published' in tender and tender['published']:
+                    normalized["date_published"] = self._parse_date(tender['published'])
+                
+                if 'deadline' in tender and tender['deadline']:
+                    normalized["closing_date"] = self._parse_date(tender['deadline'])
+                
+                # URL
+                if 'url' in tender and tender['url']:
+                    normalized["url"] = tender['url']
+                
+                # Include any additional fields as metadata
+                metadata = {}
+                for k, v in tender.items():
+                    if k not in normalized and v is not None:
+                        metadata[k] = str(v) if not isinstance(v, (str, int, float, bool, type(None))) else v
+                
+                # If we have metadata, add it to the normalized tender
+                if metadata:
+                    normalized["metadata"] = json.dumps(metadata)
+            
+            elif source.lower() == 'ted_eu':
+                # TED EU specific normalization
+                print(f"Applying TED EU-specific normalization for tender: {tender.get('title', 'No Title')}")
+                
+                # Notice ID
+                if 'reference' in tender and tender['reference']:
+                    normalized["notice_id"] = tender['reference']
+                elif 'doc_id' in tender and tender['doc_id']:
+                    normalized["notice_id"] = tender['doc_id']
+                
+                # Title
+                if 'title' in tender and tender['title']:
+                    normalized["notice_title"] = tender['title']
+                
+                # Type
+                if 'notice_type' in tender and tender['notice_type']:
+                    normalized["notice_type"] = tender['notice_type']
+                
+                # Description
+                if 'description' in tender and tender['description']:
+                    normalized["description"] = tender['description']
+                
+                # Issuing authority
+                if 'authority' in tender and tender['authority']:
+                    normalized["issuing_authority"] = tender['authority']
+                
+                # Country
+                if 'country' in tender and tender['country']:
+                    normalized["country"] = tender['country']
+                
+                # Dates
+                if 'publication_date' in tender and tender['publication_date']:
+                    normalized["date_published"] = self._parse_date(tender['publication_date'])
+                
+                if 'deadline' in tender and tender['deadline']:
+                    normalized["closing_date"] = self._parse_date(tender['deadline'])
+                
+                # URL
+                if 'url' in tender and tender['url']:
+                    normalized["url"] = tender['url']
+                
+                # Value and currency
+                if 'value' in tender and tender['value'] is not None:
+                    try:
+                        normalized["value"] = float(tender['value'])
+                    except (ValueError, TypeError):
+                        pass
+                
+                if 'currency' in tender and tender['currency']:
+                    normalized["currency"] = tender['currency']
+                
+                # CPVs
+                if 'cpvs' in tender and tender['cpvs']:
+                    if isinstance(tender['cpvs'], list):
+                        normalized["cpvs"] = tender['cpvs']
+                    elif isinstance(tender['cpvs'], str):
+                        normalized["cpvs"] = [cpv.strip() for cpv in tender['cpvs'].split(',') if cpv.strip()]
+                
+                # Include any additional fields as metadata
+                metadata = {}
+                for k, v in tender.items():
+                    if k not in normalized and v is not None:
+                        metadata[k] = str(v) if not isinstance(v, (str, int, float, bool, type(None))) else v
+                
+                # If we have metadata, add it to the normalized tender
+                if metadata:
+                    normalized["metadata"] = json.dumps(metadata)
+            
+            else:
+                # Generic normalization for unknown sources
+                # Map common field names that might be in the tender
                 field_mappings = {
-                    # Standard fields
-                    "title": ["title", "notice_title", "tender_title", "opportunity_title", "subject", "name"],
-                    "description": ["description", "notice_content", "tender_description", "opportunity_description", "short_description", "details", "content"],
-                    "date_published": ["date_published", "published_date", "publication_date", "published_dt", "dispatch_date", "posted_date", "release_date"],
-                    "location": ["location", "country", "countries", "place_of_performance", "beneficiary_countries", "nutscode", "region"],
-                    "issuing_authority": ["issuing_authority", "authority", "agency", "authority_name", "organization", "buyer", "contact_organization"]
+                    # ID fields
+                    'id': 'notice_id', 
+                    'tender_id': 'notice_id',
+                    'notice_id': 'notice_id',
+                    'reference': 'notice_id',
+                    'reference_number': 'notice_id',
+                    
+                    # Title fields
+                    'title': 'notice_title',
+                    'tender_title': 'notice_title',
+                    'name': 'notice_title',
+                    
+                    # Type fields
+                    'type': 'notice_type',
+                    'tender_type': 'notice_type',
+                    'procedure_type': 'notice_type',
+                    
+                    # Description fields
+                    'description': 'description',
+                    'summary': 'description',
+                    'details': 'description',
+                    
+                    # Country/Location fields
+                    'country': 'country',
+                    'nation': 'country',
+                    'location': 'location',
+                    'place': 'location',
+                    
+                    # Authority fields
+                    'issuing_authority': 'issuing_authority',
+                    'authority': 'issuing_authority',
+                    'agency': 'issuing_authority',
+                    'buyer': 'issuing_authority',
+                    'contracting_authority': 'issuing_authority',
+                    
+                    # Date fields
+                    'date_published': 'date_published',
+                    'published_date': 'date_published',
+                    'publication_date': 'date_published',
+                    'posted_date': 'date_published',
+                    'published': 'date_published',
+                    
+                    'closing_date': 'closing_date',
+                    'deadline': 'closing_date',
+                    'response_deadline': 'closing_date',
+                    'submission_deadline': 'closing_date',
+                    
+                    # Value fields
+                    'value': 'value',
+                    'amount': 'value',
+                    'total_value': 'value',
+                    'estimated_value': 'value',
+                    
+                    'currency': 'currency',
+                    
+                    # CPV fields
+                    'cpvs': 'cpvs',
+                    'cpv_codes': 'cpvs',
+                    'cpv': 'cpvs',
+                    
+                    # Buyer fields
+                    'buyer': 'buyer',
+                    'contracting_authority_name': 'buyer',
+                    
+                    # Contact fields
+                    'email': 'email',
+                    'contact_email': 'email',
+                    
+                    # URL fields
+                    'url': 'url',
+                    'link': 'url',
+                    'tender_url': 'url',
+                    
+                    # Tags
+                    'tag': 'tag',
+                    'tags': 'tag',
+                    'categories': 'tag',
+                    
+                    # Language
+                    'language': 'language',
+                    'lang': 'language'
                 }
                 
-                # Try to extract values using the mappings
-                for target_field, source_fields in field_mappings.items():
-                    for source_field in source_fields:
-                        if source_field in tender and tender[source_field]:
-                            normalized_tender[target_field] = tender[source_field]
-                            break
+                # For each field in the tender, try to map it to a normalized field
+                for tender_field, normalized_field in field_mappings.items():
+                    if tender_field in tender and tender[tender_field] is not None:
+                        # Special handling for cpvs field to ensure it's a list
+                        if normalized_field == 'cpvs':
+                            if isinstance(tender[tender_field], list):
+                                normalized[normalized_field] = tender[tender_field]
+                            elif isinstance(tender[tender_field], str):
+                                normalized[normalized_field] = [cpv.strip() for cpv in tender[tender_field].split(',') if cpv.strip()]
+                            continue
+                        
+                        # Special handling for date fields
+                        if normalized_field in ['date_published', 'closing_date']:
+                            normalized[normalized_field] = self._parse_date(tender[tender_field])
+                            continue
+                        
+                        # Special handling for value field to ensure it's a float
+                        if normalized_field == 'value' and tender[tender_field] is not None:
+                            try:
+                                normalized[normalized_field] = float(tender[tender_field])
+                            except (ValueError, TypeError):
+                                pass
+                            continue
+                        
+                        # For other fields, just copy the value
+                        normalized[normalized_field] = tender[tender_field]
                 
-                # Extract closing_date from various possible fields
-                closing_date_fields = ["closing_date", "deadline", "deadline_dt", "response_deadline", "submission_deadline", "end_date"]
-                for field in closing_date_fields:
-                    if field in tender and tender[field]:
-                        normalized_tender["closing_date"] = tender[field]
-                        break
+                # Include any additional fields as metadata
+                metadata = {}
+                for k, v in tender.items():
+                    if k not in field_mappings and v is not None:
+                        metadata[k] = str(v) if not isinstance(v, (str, int, float, bool, type(None))) else v
                 
-                # Always make sure raw_id is a string
-                # Use notice_id as raw_id if available
-                if "notice_id" in tender and tender["notice_id"]:
-                    normalized_tender["raw_id"] = str(tender["notice_id"])
-                elif "id" in tender and tender["id"]:
-                    normalized_tender["raw_id"] = str(tender["id"])
-                elif "opportunity_id" in tender and tender["opportunity_id"]:
-                    normalized_tender["raw_id"] = str(tender["opportunity_id"])
-                elif "reference" in tender and tender["reference"]:
-                    normalized_tender["raw_id"] = str(tender["reference"])
-                
-                # Source-specific handling for special fields
-                if source_name == "ungm":
-                    normalized_tender["issuing_authority"] = "United Nations Global Marketplace"
-                elif source_name == "afdb":
-                    normalized_tender["issuing_authority"] = "African Development Bank"
-                elif source_name == "wb":
-                    normalized_tender["issuing_authority"] = "World Bank"
-                elif source_name == "afd":
-                    normalized_tender["issuing_authority"] = "Agence Française de Développement"
-                elif source_name == "sam_gov":
-                    normalized_tender["issuing_authority"] = "System for Award Management (SAM.gov)"
-                elif source_name == "ted_eu":
-                    normalized_tender["issuing_authority"] = tender.get("authority_name", "European Union")
-            else:
-                # For non-dict tenders, create a minimal record with what we have
-                print(f"Warning: Tender is not a dictionary. Type: {type(tender)}")
-                if isinstance(tender, str):
-                    # If it's a string, use it as description
-                    normalized_tender["description"] = tender[:1000]  # Limit length
+                # If we have metadata, add it to the normalized tender
+                if metadata:
+                    normalized["metadata"] = json.dumps(metadata)
             
-            # Debug the normalized tender
-            print(f"Normalized tender: {normalized_tender['title'][:50]}...")
+            # Ensure the source is recorded
+            normalized["source"] = source
             
-            return normalized_tender
+            # Handle tag field to ensure it's always a list
+            if not normalized.get("tag") or not isinstance(normalized["tag"], list):
+                normalized["tag"] = []
             
+            # Perform basic validation
+            self._validate_normalized_tender(normalized)
+            
+            return normalized
         except Exception as e:
-            # Log the error but still return a minimal valid tender
-            print(f"Error in direct normalization: {str(e)}")
+            print(f"Error normalizing tender from source {source}: {e}")
+            traceback.print_exc()
+            # Return an empty dict if normalization fails
+            return {}
+
+    def _validate_normalized_tender(self, tender):
+        """Validate a normalized tender to ensure required fields are present."""
+        required_fields = ["notice_id", "notice_title", "source"]
+        
+        for field in required_fields:
+            if field not in tender or tender[field] is None or tender[field] == "":
+                if field == "notice_id":
+                    tender[field] = str(uuid.uuid4())
+                elif field == "notice_title":
+                    tender[field] = f"Untitled Tender from {tender.get('source', 'Unknown')}"
+                elif field == "source":
+                    tender[field] = "Unknown"
+        
+        # Validate data types
+        if "notice_title" in tender and not isinstance(tender["notice_title"], str):
+            tender["notice_title"] = str(tender["notice_title"])
+        
+        if "description" in tender and not isinstance(tender["description"], str):
+            tender["description"] = str(tender["description"])
+        
+        if "cpvs" in tender and not isinstance(tender["cpvs"], list):
+            if isinstance(tender["cpvs"], str):
+                tender["cpvs"] = [tender["cpvs"]]
+            else:
+                tender["cpvs"] = []
+        
+        if "tag" in tender and not isinstance(tender["tag"], list):
+            if isinstance(tender["tag"], str):
+                tender["tag"] = [tender["tag"]]
+            else:
+                tender["tag"] = []
+        
+        # Validate dates
+        if "date_published" in tender and tender["date_published"]:
+            if not self._is_valid_date_format(tender["date_published"]):
+                tender["date_published"] = None
+        
+        if "closing_date" in tender and tender["closing_date"]:
+            if not self._is_valid_date_format(tender["closing_date"]):
+                tender["closing_date"] = None
+        
+        return tender
+
+    def _create_exec_sql_function(self):
+        """Attempt to create the exec_sql function if it doesn't exist."""
+        try:
+            # Check if exec_sql exists already
+            function_exists = False
+            try:
+                # Try to call the function with a simple command
+                self.supabase.rpc('exec_sql', {'sql': 'SELECT 1'}).execute()
+                print("exec_sql function exists")
+                function_exists = True
+            except Exception as e:
+                if "Could not find the function" in str(e) or "does not exist" in str(e):
+                    print("exec_sql function does not exist, will try to create it")
+                else:
+                    print(f"Error checking exec_sql function: {e}")
             
-            # Return a minimal valid tender to ensure something is inserted
-            return {
-                "title": f"Untitled Tender from {source_name}",
-                "description": f"Error during normalization: {str(e)}",
-                "source": source_name,
-                "raw_id": str(processed_count),
-                "processed_at": self._get_current_timestamp()
-            }
+            if function_exists:
+                return True
+            
+            # Try to create the function using direct psycopg2 connection if possible
+            try:
+                # Try to use URL and key from supabase client to connect
+                from urllib.parse import urlparse
+                import psycopg2
+                
+                # Try to extract URL from client
+                url = None
+                if hasattr(self.supabase, 'url'):
+                    url = self.supabase.url
+                elif hasattr(self.supabase, '_url'):
+                    url = self.supabase._url
+                elif hasattr(self.supabase, 'rest_url'):
+                    url = self.supabase.rest_url
+                    
+                # Try to extract key from client
+                key = None
+                if hasattr(self.supabase, 'key'):
+                    key = self.supabase.key
+                elif hasattr(self.supabase, '_key'):
+                    key = self.supabase._key
+                elif hasattr(self.supabase, 'supabase_key'):
+                    key = self.supabase.supabase_key
+                    
+                if not url or not key:
+                    print("Could not extract URL and key from Supabase client")
+                    return False
+                    
+                # Get the host from the URL
+                parsed_url = urlparse(url)
+                if not parsed_url.netloc:
+                    print(f"Invalid URL format: {url}")
+                    return False
+                    
+                # Extract project ID from host 
+                host_parts = parsed_url.netloc.split('.')
+                if len(host_parts) < 2:
+                    print(f"Could not parse host from URL: {url}")
+                    return False
+                    
+                project_id = host_parts[0]
+                
+                # Connect to the database using psycopg2
+                conn_string = f"postgresql://postgres:{key}@{project_id}.supabase.co:5432/postgres"
+                
+                print(f"Attempting to connect to {project_id}.supabase.co")
+                conn = psycopg2.connect(conn_string, connect_timeout=10)
+                cursor = conn.cursor()
+                
+                # Create the exec_sql function
+                exec_sql_function = """
+                CREATE OR REPLACE FUNCTION public.exec_sql(sql text)
+                RETURNS void AS $$
+                BEGIN
+                  EXECUTE sql;
+                END;
+                $$ LANGUAGE plpgsql SECURITY DEFINER;
+                """
+                
+                cursor.execute(exec_sql_function)
+                conn.commit()
+                cursor.close()
+                conn.close()
+                print("Successfully created exec_sql function")
+                return True
+            except Exception as direct_e:
+                print(f"Could not create exec_sql function via direct connection: {direct_e}")
+            
+            # If we couldn't create the function, we'll just continue without it
+            print("Will continue without exec_sql function, using fallback methods for schema creation")
+            return False
+        except Exception as e:
+            print(f"Error in _create_exec_sql_function: {e}")
+            return False
