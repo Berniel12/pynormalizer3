@@ -99,4 +99,4 @@ def get_available_sources(supabase):
     return ["adb", "wb", "ungm"]
 
 if __name__ == "__main__":
-    Actor.main(main)
+    Actor.run(main)
