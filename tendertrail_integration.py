@@ -732,9 +732,18 @@ class TenderTrailIntegration:
                 print(f"Error initializing translator: {e}")
             
             # First check if metadata column exists in the table
-            # In API-only mode, we'll assume the metadata column exists
-            metadata_column_exists = True
-            print("Assuming metadata column exists in API-only mode")
+            metadata_column_exists = False
+            try:
+                # Try a simple query to check if metadata column exists
+                self.supabase.table('unified_tenders').select('metadata').limit(1).execute()
+                metadata_column_exists = True
+                print("Metadata column exists in unified_tenders table")
+            except Exception as e:
+                if "metadata" in str(e) and "does not exist" in str(e):
+                    print("Metadata column does not exist in unified_tenders table")
+                    print("Will skip metadata field in inserts")
+                else:
+                    print(f"Error checking metadata column: {e}")
             
             # Ensure all fields are properly formatted
             for tender in normalized_tenders:
@@ -864,7 +873,7 @@ class TenderTrailIntegration:
                     if "processed_at" not in cleaned_tender:
                         cleaned_tender["processed_at"] = self._get_current_timestamp()
                     
-                    # Add metadata column if it exists in the database
+                    # Add metadata column if it exists in the database and we have metadata
                     if metadata_column_exists and metadata:
                         cleaned_tender["metadata"] = json.dumps(metadata)
                     
