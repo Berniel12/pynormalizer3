@@ -58,7 +58,28 @@ class TenderTrailIntegration:
                 # Deep copy to avoid modifying original data
                 tender = self._ensure_dict(raw_tender)
                 
-                # Preprocess tender
+                # Debug what we're getting
+                print(f"Processing tender type: {type(tender)}, Sample: {str(tender)[:100]}")
+                
+                # Preprocess tender - handle string case specifically before preprocessing
+                if isinstance(tender, str):
+                    # Try to parse as JSON first
+                    try:
+                        parsed_tender = json.loads(tender)
+                        if isinstance(parsed_tender, dict):
+                            tender = parsed_tender
+                        else:
+                            # Create a simple wrapper for non-dict parsed data
+                            tender = {"text": str(parsed_tender), "id": str(processed_count)}
+                    except json.JSONDecodeError:
+                        # Not valid JSON, create a text container
+                        tender = {"text": tender, "id": str(processed_count)}
+                
+                # If we still don't have a dictionary, create one
+                if not isinstance(tender, dict):
+                    tender = {"data": str(tender), "id": str(processed_count)}
+                    
+                # Now preprocess with the proper dictionary
                 preprocessed_tender = self.preprocessor.preprocess(tender, source_schema)
                 
                 # Normalize tender
@@ -445,6 +466,8 @@ class TenderTrailIntegration:
         # Extra debugging to understand the data format
         sample_item = raw_data[0] if raw_data else None
         print(f"Sample raw tender type: {type(sample_item)}")
+        if sample_item:
+            print(f"Sample raw tender preview: {str(sample_item)[:200]}")
         
         # Process each item
         for item in raw_data:
@@ -456,8 +479,9 @@ class TenderTrailIntegration:
                         processed_tenders.append(parsed_item)
                         continue
                     except json.JSONDecodeError:
-                        # Not valid JSON, keep as is
-                        pass
+                        # Not valid JSON, keep as is - we'll handle it in process_source
+                        processed_tenders.append(item)
+                        continue
                 
                 # If it's a dict, use it directly
                 if isinstance(item, dict):
@@ -466,22 +490,32 @@ class TenderTrailIntegration:
                     
                 # If it has a 'data' field that contains the tender
                 if hasattr(item, 'get') and callable(item.get):
-                    if 'data' in item and isinstance(item.get('data'), (dict, str)):
+                    try:
                         data = item.get('data')
-                        if isinstance(data, str):
-                            try:
-                                data = json.loads(data)
-                            except:
-                                pass
-                        if isinstance(data, dict):
-                            processed_tenders.append(data)
-                            continue
+                        if data is not None:
+                            if isinstance(data, str):
+                                try:
+                                    parsed_data = json.loads(data)
+                                    processed_tenders.append(parsed_data)
+                                    continue
+                                except:
+                                    # Not valid JSON, keep the string
+                                    processed_tenders.append(data)
+                                    continue
+                            else:
+                                processed_tenders.append(data)
+                                continue
+                    except:
+                        # Fallback if get fails
+                        pass
                 
-                # Add the item as-is and let _ensure_dict handle it later
+                # Add the item as-is and let process_source handle it
                 processed_tenders.append(item)
                 
             except Exception as e:
                 print(f"Error processing raw tender item: {e}")
+                # Add the raw item anyway, we'll try to handle it in process_source
+                processed_tenders.append(item)
         
         return processed_tenders
     
