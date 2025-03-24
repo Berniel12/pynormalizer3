@@ -72,6 +72,9 @@ class TenderTrailIntegration:
         print(f"Processing {len(tenders) if isinstance(tenders, (list, tuple)) else 'unknown number of'} tenders from source: {source_name}")
         
         try:
+            # Store the current source name for use in normalization
+            self._current_source = source_name
+            
             # Exit early if no tenders
             if not tenders:
                 print(f"No tenders to process for source: {source_name}")
@@ -146,10 +149,15 @@ class TenderTrailIntegration:
             else:
                 print(f"No tenders were successfully normalized for source: {source_name}")
             
+            # Clear the current source after processing
+            self._current_source = None
+            
             return processed_count, error_count
         except Exception as e:
             print(f"Error processing source {source_name}: {e}")
             traceback.print_exc()
+            # Clear the current source in case of error
+            self._current_source = None
             return 0, 0
     
     def process_json_tenders(self, json_data, source_name):
@@ -973,20 +981,28 @@ class TenderTrailIntegration:
             
             # Convert source to string and extract actual source name
             source = str(source)
-            # If source is numeric, use the original source name from the tender if available
+            # Map numeric source to actual source name
             if source.isdigit():
-                if isinstance(tender, dict) and 'source' in tender:
-                    source = tender['source']
-                elif isinstance(tender, str):
-                    try:
-                        parsed = json.loads(tender)
-                        if isinstance(parsed, dict) and 'source' in parsed:
-                            source = parsed['source']
-                    except:
-                        pass
+                # Get the actual source name from the current context
+                source_context = getattr(self, '_current_source', None)
+                if source_context:
+                    source = source_context
+                else:
+                    # Try to get source from tender data
+                    if isinstance(tender, dict) and 'source' in tender:
+                        source = tender['source']
+                    elif isinstance(tender, str):
+                        try:
+                            parsed = json.loads(tender)
+                            if isinstance(parsed, dict) and 'source' in parsed:
+                                source = parsed['source']
+                        except:
+                            pass
+            
+            # Store original tender for metadata
+            original_tender = tender
             
             # Handle string tender by trying to parse it as JSON
-            original_tender = tender
             if isinstance(tender, str):
                 try:
                     # Attempt to parse as JSON
@@ -996,17 +1012,30 @@ class TenderTrailIntegration:
                     else:
                         # If it parsed but not into a dict, try to extract meaningful content
                         print(f"Warning: Tender from {source} is a string that parsed to {type(parsed_tender)}, attempting to extract content")
-                        tender = self._extract_tender_data(parsed_tender, source)
+                        # Create a basic tender structure from the string content
+                        tender = {
+                            'title': f"Tender from {source}",
+                            'description': original_tender if len(original_tender) < 2000 else original_tender[:2000],
+                            'source': source,
+                            'content': original_tender,
+                            'raw_content': original_tender  # Store the original content
+                        }
                 except json.JSONDecodeError:
                     # Not valid JSON, try to extract meaningful content
                     print(f"Warning: Tender from {source} is a string but not valid JSON, attempting to extract content")
-                    # Create a basic tender structure from the string content
-                    tender = {
-                        'title': f"Tender from {source}",
-                        'description': original_tender if len(original_tender) < 2000 else original_tender[:2000],
-                        'source': source,
-                        'content': original_tender
-                    }
+                    # Try to extract structured data
+                    extracted = self._extract_tender_data(original_tender, source)
+                    if extracted and isinstance(extracted, dict) and len(extracted) > 2:  # More than just source and content
+                        tender = extracted
+                    else:
+                        # Create a basic tender structure
+                        tender = {
+                            'title': f"Tender from {source}",
+                            'description': original_tender if len(original_tender) < 2000 else original_tender[:2000],
+                            'source': source,
+                            'content': original_tender,
+                            'raw_content': original_tender  # Store the original content
+                        }
             
             # If tender is still a string after extraction attempts, create a minimal wrapper
             if isinstance(tender, str):
@@ -1014,7 +1043,8 @@ class TenderTrailIntegration:
                     'title': f"Tender from {source}",
                     'description': tender if len(tender) < 2000 else tender[:2000],
                     'source': source,
-                    'content': tender
+                    'content': tender,
+                    'raw_content': tender
                 }
             
             # Ensure tender is a dictionary
@@ -1023,7 +1053,8 @@ class TenderTrailIntegration:
                     'title': f"Tender from {source}",
                     'description': str(tender) if len(str(tender)) < 2000 else str(tender)[:2000],
                     'source': source,
-                    'content': str(tender)
+                    'content': str(tender),
+                    'raw_content': str(tender)
                 }
             
             # Start with a base document that contains all required fields with default values
@@ -1068,7 +1099,9 @@ class TenderTrailIntegration:
             
             if not normalized['description']:
                 # If we have the original content, use that as the description
-                if isinstance(tender, dict) and 'content' in tender:
+                if isinstance(tender, dict) and 'raw_content' in tender:
+                    normalized['description'] = tender['raw_content'][:2000]
+                elif isinstance(tender, dict) and 'content' in tender:
                     normalized['description'] = tender['content'][:2000]
                 else:
                     # Generate description from available fields
@@ -1087,7 +1120,9 @@ class TenderTrailIntegration:
                     normalized['description'] = " | ".join(desc_parts) if desc_parts else "No detailed description available"
             
             # Include any additional fields as metadata
-            metadata = {}
+            metadata = {
+                'raw_content': original_tender if isinstance(original_tender, str) else str(original_tender)
+            }
             for k, v in tender.items():
                 if k not in normalized and v is not None and str(v).strip():
                     metadata[k] = str(v) if not isinstance(v, (str, int, float, bool, type(None))) else v
