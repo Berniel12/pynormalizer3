@@ -539,13 +539,34 @@ class TenderTrailIntegration:
     def _get_raw_tenders(self, source_name: str, batch_size: int) -> List[Dict[str, Any]]:
         """Get raw tenders from source table."""
         try:
+            # Store the source name for use in normalization
+            self._current_source = source_name
+            
             # First, try the source_tenders table format
             table_name = f"{source_name}_tenders"
             try:
                 response = self.supabase.table(table_name).select('*').limit(batch_size).execute()
                 if response and response.data:
-                    # Process tenders
-                    return self._process_raw_tenders(response.data)
+                    # Process tenders and ensure source name is preserved
+                    processed = []
+                    for tender in response.data:
+                        if isinstance(tender, dict):
+                            tender['source'] = source_name
+                        elif isinstance(tender, str):
+                            try:
+                                parsed = json.loads(tender)
+                                if isinstance(parsed, dict):
+                                    parsed['source'] = source_name
+                                    tender = parsed
+                            except:
+                                # If parsing fails, wrap the string in a dict
+                                tender = {
+                                    'content': tender,
+                                    'source': source_name,
+                                    'raw_data': tender
+                                }
+                        processed.append(tender)
+                    return processed
             except Exception as e:
                 print(f"Table {table_name} not found, trying direct source table {source_name}")
             
@@ -557,20 +578,62 @@ class TenderTrailIntegration:
                     # Mark processed records
                     if response and response.data:
                         ids = []
+                        processed = []
                         for item in response.data:
-                            if isinstance(item, dict) and 'id' in item:
-                                ids.append(item['id'])
+                            if isinstance(item, dict):
+                                item['source'] = source_name
+                                if 'id' in item:
+                                    ids.append(item['id'])
+                                if 'data' in item:
+                                    # Store the raw data
+                                    item['raw_data'] = item['data']
+                            elif isinstance(item, str):
+                                try:
+                                    parsed = json.loads(item)
+                                    if isinstance(parsed, dict):
+                                        parsed['source'] = source_name
+                                        item = parsed
+                                except:
+                                    # If parsing fails, wrap the string
+                                    item = {
+                                        'content': item,
+                                        'source': source_name,
+                                        'raw_data': item
+                                    }
+                            processed.append(item)
                         
                         if ids:
                             self.supabase.table(source_name).update({'processed': True}).in_('id', ids).execute()
                         
-                        return self._process_raw_tenders(response.data)
+                        return processed
                 except Exception as e:
                     print(f"Error querying with processed field, trying without: {e}")
                     # Try without processed field
                     response = self.supabase.table(source_name).select('*').limit(batch_size).execute()
                     if response and response.data:
-                        return self._process_raw_tenders(response.data)
+                        # Process tenders and ensure source name is preserved
+                        processed = []
+                        for item in response.data:
+                            if isinstance(item, dict):
+                                item['source'] = source_name
+                                if 'data' in item:
+                                    # Store the raw data
+                                    item['raw_data'] = item['data']
+                            elif isinstance(item, str):
+                                try:
+                                    parsed = json.loads(item)
+                                    if isinstance(parsed, dict):
+                                        parsed['source'] = source_name
+                                        item = parsed
+                                except:
+                                    # If parsing fails, wrap the string
+                                    item = {
+                                        'content': item,
+                                        'source': source_name,
+                                        'raw_data': item
+                                    }
+                            processed.append(item)
+                        return processed
             except Exception as e:
                 print(f"Error querying table {source_name}: {e}")
             
@@ -987,20 +1050,19 @@ class TenderTrailIntegration:
                 source_context = getattr(self, '_current_source', None)
                 if source_context:
                     source = source_context
-                else:
+                elif isinstance(tender, dict):
                     # Try to get source from tender data
-                    if isinstance(tender, dict) and 'source' in tender:
-                        source = tender['source']
-                    elif isinstance(tender, str):
-                        try:
-                            parsed = json.loads(tender)
-                            if isinstance(parsed, dict) and 'source' in parsed:
-                                source = parsed['source']
-                        except:
-                            pass
+                    source = tender.get('source', source_context or source)
             
             # Store original tender for metadata
             original_tender = tender
+            raw_data = None
+            
+            # Extract raw data if available
+            if isinstance(tender, dict):
+                raw_data = tender.get('raw_data', tender.get('data', None))
+            elif isinstance(tender, str):
+                raw_data = tender
             
             # Handle string tender by trying to parse it as JSON
             if isinstance(tender, str):
@@ -1009,6 +1071,9 @@ class TenderTrailIntegration:
                     parsed_tender = json.loads(tender)
                     if isinstance(parsed_tender, dict):
                         tender = parsed_tender
+                        # Update source if available in parsed data
+                        if 'source' in tender:
+                            source = tender['source']
                     else:
                         # If it parsed but not into a dict, try to extract meaningful content
                         print(f"Warning: Tender from {source} is a string that parsed to {type(parsed_tender)}, attempting to extract content")
@@ -1018,7 +1083,7 @@ class TenderTrailIntegration:
                             'description': original_tender if len(original_tender) < 2000 else original_tender[:2000],
                             'source': source,
                             'content': original_tender,
-                            'raw_content': original_tender  # Store the original content
+                            'raw_data': raw_data or original_tender
                         }
                 except json.JSONDecodeError:
                     # Not valid JSON, try to extract meaningful content
@@ -1027,6 +1092,7 @@ class TenderTrailIntegration:
                     extracted = self._extract_tender_data(original_tender, source)
                     if extracted and isinstance(extracted, dict) and len(extracted) > 2:  # More than just source and content
                         tender = extracted
+                        tender['raw_data'] = raw_data or original_tender
                     else:
                         # Create a basic tender structure
                         tender = {
@@ -1034,7 +1100,7 @@ class TenderTrailIntegration:
                             'description': original_tender if len(original_tender) < 2000 else original_tender[:2000],
                             'source': source,
                             'content': original_tender,
-                            'raw_content': original_tender  # Store the original content
+                            'raw_data': raw_data or original_tender
                         }
             
             # If tender is still a string after extraction attempts, create a minimal wrapper
@@ -1044,7 +1110,7 @@ class TenderTrailIntegration:
                     'description': tender if len(tender) < 2000 else tender[:2000],
                     'source': source,
                     'content': tender,
-                    'raw_content': tender
+                    'raw_data': raw_data or tender
                 }
             
             # Ensure tender is a dictionary
@@ -1054,7 +1120,7 @@ class TenderTrailIntegration:
                     'description': str(tender) if len(str(tender)) < 2000 else str(tender)[:2000],
                     'source': source,
                     'content': str(tender),
-                    'raw_content': str(tender)
+                    'raw_data': raw_data or str(tender)
                 }
             
             # Start with a base document that contains all required fields with default values
@@ -1098,11 +1164,13 @@ class TenderTrailIntegration:
                 normalized['notice_title'] = " ".join(title_parts) if title_parts else f"Tender from {source}"
             
             if not normalized['description']:
-                # If we have the original content, use that as the description
-                if isinstance(tender, dict) and 'raw_content' in tender:
-                    normalized['description'] = tender['raw_content'][:2000]
+                # If we have the raw data, use that as the description
+                if raw_data:
+                    normalized['description'] = str(raw_data)[:2000]
+                elif isinstance(tender, dict) and 'raw_data' in tender:
+                    normalized['description'] = str(tender['raw_data'])[:2000]
                 elif isinstance(tender, dict) and 'content' in tender:
-                    normalized['description'] = tender['content'][:2000]
+                    normalized['description'] = str(tender['content'])[:2000]
                 else:
                     # Generate description from available fields
                     desc_parts = []
@@ -1121,7 +1189,7 @@ class TenderTrailIntegration:
             
             # Include any additional fields as metadata
             metadata = {
-                'raw_content': original_tender if isinstance(original_tender, str) else str(original_tender)
+                'raw_data': raw_data if raw_data else (original_tender if isinstance(original_tender, str) else str(original_tender))
             }
             for k, v in tender.items():
                 if k not in normalized and v is not None and str(v).strip():
