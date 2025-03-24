@@ -551,15 +551,27 @@ class TenderTrailIntegration:
                     processed = []
                     for tender in response.data:
                         if isinstance(tender, dict):
+                            # Ensure source name is correct
                             tender['source'] = source_name
+                            # Store raw data if not already present
+                            if 'raw_data' not in tender:
+                                tender['raw_data'] = json.dumps(tender)
                         elif isinstance(tender, str):
                             try:
                                 parsed = json.loads(tender)
                                 if isinstance(parsed, dict):
                                     parsed['source'] = source_name
+                                    parsed['raw_data'] = tender
                                     tender = parsed
+                                else:
+                                    # If parsed but not a dict, wrap it
+                                    tender = {
+                                        'content': tender,
+                                        'source': source_name,
+                                        'raw_data': tender
+                                    }
                             except:
-                                # If parsing fails, wrap the string in a dict
+                                # If parsing fails, wrap the string
                                 tender = {
                                     'content': tender,
                                     'source': source_name,
@@ -581,18 +593,27 @@ class TenderTrailIntegration:
                         processed = []
                         for item in response.data:
                             if isinstance(item, dict):
+                                # Ensure source name is correct
                                 item['source'] = source_name
                                 if 'id' in item:
                                     ids.append(item['id'])
-                                if 'data' in item:
-                                    # Store the raw data
-                                    item['raw_data'] = item['data']
+                                # Store raw data if not already present
+                                if 'raw_data' not in item:
+                                    item['raw_data'] = json.dumps(item)
                             elif isinstance(item, str):
                                 try:
                                     parsed = json.loads(item)
                                     if isinstance(parsed, dict):
                                         parsed['source'] = source_name
+                                        parsed['raw_data'] = item
                                         item = parsed
+                                    else:
+                                        # If parsed but not a dict, wrap it
+                                        item = {
+                                            'content': item,
+                                            'source': source_name,
+                                            'raw_data': item
+                                        }
                                 except:
                                     # If parsing fails, wrap the string
                                     item = {
@@ -615,16 +636,25 @@ class TenderTrailIntegration:
                         processed = []
                         for item in response.data:
                             if isinstance(item, dict):
+                                # Ensure source name is correct
                                 item['source'] = source_name
-                                if 'data' in item:
-                                    # Store the raw data
-                                    item['raw_data'] = item['data']
+                                # Store raw data if not already present
+                                if 'raw_data' not in item:
+                                    item['raw_data'] = json.dumps(item)
                             elif isinstance(item, str):
                                 try:
                                     parsed = json.loads(item)
                                     if isinstance(parsed, dict):
                                         parsed['source'] = source_name
+                                        parsed['raw_data'] = item
                                         item = parsed
+                                    else:
+                                        # If parsed but not a dict, wrap it
+                                        item = {
+                                            'content': item,
+                                            'source': source_name,
+                                            'raw_data': item
+                                        }
                                 except:
                                     # If parsing fails, wrap the string
                                     item = {
@@ -1061,6 +1091,9 @@ class TenderTrailIntegration:
             # Extract raw data if available
             if isinstance(tender, dict):
                 raw_data = tender.get('raw_data', tender.get('data', None))
+                # If source is in the tender dict, use it
+                if 'source' in tender and tender['source'] != '100':
+                    source = tender['source']
             elif isinstance(tender, str):
                 raw_data = tender
             
@@ -1072,7 +1105,7 @@ class TenderTrailIntegration:
                     if isinstance(parsed_tender, dict):
                         tender = parsed_tender
                         # Update source if available in parsed data
-                        if 'source' in tender:
+                        if 'source' in tender and tender['source'] != '100':
                             source = tender['source']
                     else:
                         # If it parsed but not into a dict, try to extract meaningful content
@@ -1139,7 +1172,7 @@ class TenderTrailIntegration:
                 "cpvs": tender.get('cpvs', []) if isinstance(tender.get('cpvs'), list) else [tender.get('cpvs')] if tender.get('cpvs') else [],
                 "buyer": tender.get('buyer', tender.get('contracting_authority_name', '')),
                 "email": tender.get('email', tender.get('contact_email', '')),
-                "source": source,
+                "source": source,  # Use the corrected source name
                 "url": tender.get('url', tender.get('link', tender.get('tender_url', ''))),
                 "tag": tender.get('tag', tender.get('tags', tender.get('categories', []))),
                 "language": tender.get('language', tender.get('lang', 'en'))
