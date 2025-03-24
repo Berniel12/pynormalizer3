@@ -49,19 +49,23 @@ async def main():
         if process_all_sources or not source_name:
             # Get all available sources
             sources = get_available_sources(integration.supabase)
-            await Actor.log.info(f"Processing all available sources: {', '.join(sources)}")
+            if not sources:
+                print("No sources found. Please create source tables or specify a source name.")
+                return
+                
+            print(f"Processing all available sources: {', '.join(sources)}")
             
             for source in sources:
-                await Actor.log.info(f"Starting normalization for source: {source}")
+                print(f"Starting normalization for source: {source}")
                 result = integration.process_source(source, batch_size)
                 all_results.append(result)
-                await Actor.log.info(f"Completed normalization for {source}. Processed {result['processed_count']} tenders.")
+                print(f"Completed normalization for {source}. Processed {result['processed_count']} tenders.")
         else:
             # Process single source
-            await Actor.log.info(f"Starting normalization for source: {source_name}")
+            print(f"Starting normalization for source: {source_name}")
             result = integration.process_source(source_name, batch_size)
             all_results.append(result)
-            await Actor.log.info(f"Normalization completed. Processed {result['processed_count']} tenders.")
+            print(f"Normalization completed. Processed {result['processed_count']} tenders.")
         
         # Combine results
         combined_result = {
@@ -75,29 +79,20 @@ async def main():
         # Save result to default dataset
         await Actor.push_data(combined_result)
         
-        await Actor.log.info(f"All normalization completed. Processed {combined_result['total_processed']} tenders across {combined_result['sources_processed']} sources.")
+        print(f"All normalization completed. Processed {combined_result['total_processed']} tenders across {combined_result['sources_processed']} sources.")
 
 def get_available_sources(supabase):
     """Get all available tender sources from the database."""
-    # First, try to get sources from the source_schemas table
     try:
+        # Try to get sources from the source_schemas table
         response = supabase.table('source_schemas').select('name').execute()
         if response.data:
             return [source['name'] for source in response.data]
     except Exception as e:
         print(f"Error getting sources from source_schemas: {e}")
     
-    # Fallback to querying tables that end with _tenders
-    try:
-        response = supabase.rpc('get_tables_with_suffix', {'suffix': '_tenders'}).execute()
-        if response.data:
-            # Extract source names by removing the _tenders suffix
-            return [table_name.replace('_tenders', '') for table_name in response.data]
-    except Exception as e:
-        print(f"Error getting tables with _tenders suffix: {e}")
-    
-    # Final fallback to default sources
-    return ["adb", "wb", "ungm"]
+    # Fallback to known sources
+    return ["adb", "afd", "afdb", "aiib", "iadb", "sam_gov", "ted_eu", "ungm", "wb"]
 
 if __name__ == "__main__":
     asyncio.run(main())
