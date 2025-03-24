@@ -19,20 +19,20 @@
     "openaiApiKey": {
       "title": "OpenAI API Key",
       "type": "string",
-      "description": "Your OpenAI API key for GPT-4o mini access",
+      "description": "Your OpenAI API key for GPT-4o mini access. Can also be provided via OPENAI_API_KEY environment variable.",
       "editor": "textfield",
       "isSecret": true
     },
     "supabaseUrl": {
       "title": "Supabase URL",
       "type": "string",
-      "description": "URL of your Supabase instance",
+      "description": "URL of your Supabase instance. Can also be provided via SUPABASE_URL environment variable.",
       "editor": "textfield"
     },
     "supabaseKey": {
       "title": "Supabase Key",
       "type": "string",
-      "description": "API key for your Supabase instance",
+      "description": "API key for your Supabase instance. Can also be provided via SUPABASE_KEY environment variable.",
       "editor": "textfield",
       "isSecret": true
     },
@@ -46,5 +46,5 @@
       "editor": "number"
     }
   },
-  "required": ["openaiApiKey", "supabaseUrl", "supabaseKey"]
+  "required": []
 }
