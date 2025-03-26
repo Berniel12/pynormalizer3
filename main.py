@@ -26,6 +26,10 @@ async def main():
         if not supabase_url or not supabase_key:
             raise ValueError("Supabase credentials are required")
         
+        # Set environment variables for Supabase connection
+        os.environ["SUPABASE_URL"] = supabase_url
+        os.environ["SUPABASE_KEY"] = supabase_key
+        
         # Set up cache directory
         cache_dir = os.path.join(os.getcwd(), 'storage', 'cache')
         os.makedirs(cache_dir, exist_ok=True)
@@ -35,13 +39,12 @@ async def main():
         normalizer = TenderNormalizer(provider, cache_dir)
         preprocessor = TenderPreprocessor()
         
-        # Initialize integration
-        integration = TenderTrailIntegration(
-            normalizer=normalizer,
-            preprocessor=preprocessor,
-            supabase_url=supabase_url,
-            supabase_key=supabase_key
-        )
+        # Initialize integration with the new constructor that doesn't take parameters
+        integration = TenderTrailIntegration()
+        
+        # Set normalizer and preprocessor as attributes
+        integration.normalizer = normalizer
+        integration.preprocessor = preprocessor
         
         # Process tenders
         all_results = []
