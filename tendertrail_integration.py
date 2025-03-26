@@ -6,46 +6,36 @@ from supabase import create_client, Client
 import uuid
 import traceback
 import datetime
+import re
+import os
 
 class TenderTrailIntegration:
     """Integration layer for TenderTrail normalization workflow."""
     
-    def __init__(self, normalizer, preprocessor, supabase_url, supabase_key, skip_direct_connections=False):
-        """
-        Initialize the TenderTrail integration.
-        
-        Args:
-            normalizer: The normalizer instance to use
-            preprocessor: The preprocessor instance to use
-            supabase_url: URL of the Supabase project
-            supabase_key: API key for the Supabase project
-            skip_direct_connections: Whether to skip direct PostgreSQL connections (default: False)
-        """
+    def __init__(self):
+        """Initialize the integration."""
+        # Set default attribute values
+        self.supabase = None
+        self.current_source = None
+        self.translation_available = False
+        self.translator = None
+        self.translation_cache = {}
+
+        # Try to import deep_translator for translation capability
         try:
-            self.normalizer = normalizer
-            self.preprocessor = preprocessor
-            self.supabase_url = supabase_url
-            self.supabase_key = supabase_key
-            self.skip_direct_connections = skip_direct_connections
-            
-            # Initialize Supabase client
-            try:
-                self.supabase: Client = create_client(supabase_url, supabase_key)
-                print("Successfully initialized Supabase client")
-            except Exception as e:
-                print(f"Error initializing Supabase client: {e}")
-                raise ValueError(f"Failed to initialize Supabase client: {e}")
-            
-            # Initialize translation cache
-            self.translation_cache = {}
-            
-            # Initialize schema cache
-            self.target_schema = None
-            
+            import deep_translator
+            self.translation_available = True
+            print("Translation capability is available")
+        except ImportError:
+            print("Translation library not available. Install with: pip install deep-translator")
+
+        # Initialize Supabase client
+        try:
+            self.supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
+            print("Successfully initialized Supabase client")
         except Exception as e:
-            print(f"Error in __init__: {e}")
+            print(f"Failed to initialize Supabase client: {e}")
             traceback.print_exc()
-            raise ValueError(f"Failed to initialize TenderTrailIntegration: {e}")
     
     def process_source(self, tenders_or_source, source_name_or_batch_size=None, create_tables=True):
         """
@@ -1077,83 +1067,168 @@ class TenderTrailIntegration:
             "language": "en"
         }
 
-    def _normalize_tender(self, tender, source):
-        """Normalize tender data from various sources."""
-        # Convert source to string to ensure consistent handling
-        source = str(source)
-        
-        # Handle empty tenders
+    def _normalize_tender(self, tender, source_name=None):
+        """
+        Normalize a tender from various formats into a standardized format.
+        This handles both dictionary and string inputs, extracts key fields,
+        and returns a cleaned structure.
+        """
         if not tender:
-            print(f"Warning: Empty tender from {source}")
-            return None
-            
-        # Extract tender data based on the content type
-        raw_data = None
-        try:
-            # Handle dictionary tender data
-            if isinstance(tender, dict):
-                raw_data = tender
-            # Handle string tender data - try to parse as JSON
-            elif isinstance(tender, str):
-                # Store original string as raw_data in case we need it later
-                if len(tender.strip()) > 5:
-                    try:
-                        # Try to parse as JSON
-                        raw_data = json.loads(tender)
-                    except json.JSONDecodeError:
-                        print(f"Warning: Tender from {source} is a string but not valid JSON, attempting to extract content")
-                        # If this fails, we'll handle the string as raw text
-                        raw_data = {'raw_content': tender}
-                        print(f"Extracting data from content type {type(tender)}: {tender[:20]}...")
-                else:
-                    # Skip short strings that are likely not valid tenders
-                    print(f"Warning: Skipping very short string tender: '{tender}'")
-                    return None
-            else:
-                # Unsupported data type
-                print(f"Warning: Unsupported tender data type {type(tender)} from {source}")
-                raw_data = {'raw_content': str(tender)}
-        except Exception as e:
-            print(f"Error extracting tender data: {e}")
+            print("Warning: Empty tender received")
             return None
 
-        # Clean HTML and format data
-        normalized = {
-            "notice_id": self._extract_field(raw_data, ['id', 'notice_id', 'tender_id', 'reference_no'], str(uuid.uuid4())),
-            "notice_type": self._extract_field(raw_data, ['notice_type', 'tender_type', 'procurement_type', 'type']),
-            "notice_title": self._extract_field(raw_data, ['title', 'name', 'notice_title', 'tender_title']),
-            "description": self._clean_html(self._extract_field(raw_data, ['description', 'summary', 'details', 'raw_content'])),
-            "source": source,
-            "country": self._extract_field(raw_data, ['country', 'location', 'country_name']),
-            "location": self._extract_field(raw_data, ['location', 'city', 'region', 'address']),
-            "issuing_authority": self._extract_field(raw_data, ['issuing_authority', 'buyer', 'authority', 'organization', 'contact_organization']),
-            "date_published": self._format_date(self._extract_field(raw_data, ['publication_date', 'date_published', 'published_date'])),
-            "closing_date": self._format_date(self._extract_field(raw_data, ['closing_date', 'deadline', 'submission_deadline', 'due_date'])),
-            "tender_value": self._extract_numeric(self._extract_field(raw_data, ['tender_value', 'value', 'budget', 'contract_amount', 'estimated_cost'])),
-            "currency": self._extract_field(raw_data, ['currency', 'currency_code']),
-            "categories": self._extract_field(raw_data, ['categories', 'sectors', 'sector', 'category']),
-            "contact_email": self._extract_field(raw_data, ['contact_email', 'email']),
-            "contact_phone": self._extract_field(raw_data, ['contact_phone', 'phone']),
-            "url": self._extract_field(raw_data, ['url', 'link', 'tender_url', 'pdf_url']),
-            "bid_reference_no": self._extract_field(raw_data, ['bid_reference_no', 'reference_number', 'borrower_bid_no'])
+        # Convert tender to dictionary if it's a string
+        if isinstance(tender, str):
+            try:
+                tender = json.loads(tender)
+            except json.JSONDecodeError:
+                print(f"Warning: Could not parse tender string: {tender[:100]}...")
+                return None
+
+        if not isinstance(tender, dict):
+            print(f"Warning: Unsupported tender type: {type(tender)}")
+            return None
+
+        # Set source if provided
+        if source_name and not tender.get("source"):
+            tender["source"] = source_name
+
+        # Extract key fields with helper method
+        normalized_tender = {
+            "notice_id": self._extract_field(tender, ["id", "notice_id", "tender_id", "opportunity_id", "reference"]),
+            "notice_type": self._extract_field(tender, ["notice_type", "tender_type", "type", "opportunity_type"]),
+            "notice_title": self._extract_field(tender, ["title", "notice_title", "tender_title", "opportunity_title", "project_notice"]),
+            "description": self._extract_field(tender, ["description", "summary", "notice_description", "tender_description", "pdf_content"]),
+            "date_published": self._format_date(self._extract_field(tender, ["publication_date", "published_on", "publish_date", "date_published", "date"])),
+            "closing_date": self._format_date(self._extract_field(tender, ["deadline", "deadline_date", "closing_date", "deadline_on", "response_date", "pue_date"])),
+            "tender_value": self._extract_numeric(self._extract_field(tender, ["tender_value", "value", "contract_value", "amount"])),
+            "currency": self._extract_field(tender, ["currency", "tender_currency"]),
+            "issuing_authority": self._extract_field(tender, ["issuing_authority", "authority", "organisation_name", "buyer", "agency_name"]),
+            "country": self._extract_field(tender, ["country", "beneficiary_countries", "member"]),
+            "location": self._extract_field(tender, ["location", "place_of_performance", "city"]),
+            "source": tender.get("source", source_name),
+            "categories": self._extract_field(tender, ["categories", "category", "sector", "classification_code"]),
+            "contact_email": self._extract_field(tender, ["contact_email", "email"]),
+            "contact_phone": self._extract_field(tender, ["contact_phone", "phone"]),
+            "url": self._extract_field(tender, ["url", "notice_url", "tender_url", "contact_url"]),
+            "bid_reference_no": self._extract_field(tender, ["bid_reference_no", "solicitation_number", "reference", "project_number"])
         }
-        
-        # Store raw data as JSON object, not a string
-        normalized["metadata"] = {
-            "raw_data": json.dumps(raw_data),
-            "id": self._extract_field(raw_data, ['id']),
-            "project_name": self._extract_field(raw_data, ['project_name', 'project']),
-            "project_id": self._extract_field(raw_data, ['project_id']),
-            "procurement_method": self._extract_field(raw_data, ['procurement_method', 'procurement_method_name']),
-            "processed": False
+
+        # Ensure at least a default title exists
+        if not normalized_tender["notice_title"]:
+            normalized_tender["notice_title"] = "Untitled Tender"
+
+        # Store the raw data for reference
+        normalized_tender["metadata"] = {
+            "raw_data": json.dumps(tender),
+            "id": self._extract_field(tender, ["id"]),
+            "project_name": self._extract_field(tender, ["project_name"]),
+            "project_id": self._extract_field(tender, ["project_id", "project_number"]),
+            "procurement_method": self._extract_field(tender, ["procurement_method", "procedure_type"]),
+            "processed": tender.get("processed", False)
         }
+
+        # Try to translate non-English titles and descriptions
+        try:
+            # Initialize translation if needed
+            if self.translator is None and self.translation_available:
+                try:
+                    from deep_translator import GoogleTranslator
+                    self.translator = GoogleTranslator(source='auto', target='en')
+                    self.translation_cache = {}
+                except ImportError:
+                    self.translation_available = False
+                    print("Translation capability not available")
+
+            # Translate title if it's not in English and translation is available
+            if self.translation_available and normalized_tender["notice_title"]:
+                # Check if title appears to be non-English (simple heuristic based on common characters)
+                title = normalized_tender["notice_title"]
+                # Check for non-English characters (simple heuristic)
+                if any(ord(c) > 127 for c in title) or self._detect_non_english(title):
+                    # Use cache to avoid duplicate translations
+                    cache_key = f"title:{hash(title)}"
+                    if cache_key in self.translation_cache:
+                        normalized_tender["notice_title"] = self.translation_cache[cache_key]
+                    else:
+                        try:
+                            translated_title = self.translator.translate(title)
+                            if translated_title and translated_title != title:
+                                normalized_tender["metadata"]["original_title"] = title
+                                normalized_tender["notice_title"] = translated_title
+                                self.translation_cache[cache_key] = translated_title
+                        except Exception as e:
+                            print(f"Title translation error: {e}")
+
+            # Translate description if it's not in English and translation is available
+            if self.translation_available and normalized_tender["description"]:
+                description = normalized_tender["description"]
+                # Check for non-English characters or typical markers
+                if any(ord(c) > 127 for c in description) or self._detect_non_english(description):
+                    # Use cache to avoid duplicate translations
+                    cache_key = f"desc:{hash(description[:100])}"
+                    if cache_key in self.translation_cache:
+                        normalized_tender["description"] = self.translation_cache[cache_key]
+                    else:
+                        try:
+                            # For long descriptions, break into chunks (API limits)
+                            if len(description) > 5000:
+                                chunks = [description[i:i+4500] for i in range(0, len(description), 4500)]
+                                translated_chunks = []
+                                for chunk in chunks:
+                                    translated = self.translator.translate(chunk)
+                                    translated_chunks.append(translated)
+                                translated_desc = " ".join(translated_chunks)
+                            else:
+                                translated_desc = self.translator.translate(description)
+                            
+                            if translated_desc and translated_desc != description:
+                                normalized_tender["metadata"]["original_description"] = description
+                                normalized_tender["description"] = translated_desc
+                                self.translation_cache[cache_key] = translated_desc
+                        except Exception as e:
+                            print(f"Description translation error: {e}")
+                            
+        except Exception as e:
+            print(f"Translation processing error: {e}")
+
+        return normalized_tender
         
-        # Set a default title if none found
-        if not normalized["notice_title"]:
-            normalized["notice_title"] = f"Tender from {source} - {normalized['notice_id'][:8]}"
+    def _detect_non_english(self, text):
+        """Detect if text is likely not English based on common words and patterns."""
+        # List of common words in various European languages that aren't English words
+        non_english_words = [
+            # German
+            'der', 'die', 'das', 'und', 'für', 'mit', 'von', 'zu', 'ist', 'auf', 'nicht', 'ein', 'eine',
+            # French
+            'le', 'la', 'les', 'du', 'de', 'des', 'et', 'en', 'un', 'une', 'est', 'sont', 'avec', 'pour', 'dans',
+            # Spanish
+            'el', 'la', 'los', 'las', 'un', 'una', 'unos', 'unas', 'y', 'o', 'pero', 'porque', 'como', 'qué',
+            # Italian
+            'il', 'lo', 'la', 'i', 'gli', 'le', 'un', 'uno', 'una', 'del', 'della', 'e', 'ed', 'o', 'ma', 'perché',
+            # Portuguese
+            'o', 'a', 'os', 'as', 'um', 'uma', 'uns', 'umas', 'e', 'ou', 'mas', 'porque', 'como',
+            # Dutch
+            'de', 'het', 'een', 'en', 'van', 'voor', 'met', 'op', 'in', 'is', 'zijn', 'niet'
+        ]
+        
+        # Convert text to lowercase and split into words
+        words = re.findall(r'\b\w+\b', text.lower())
+        
+        # Count how many words match non-English common words
+        non_english_count = sum(1 for word in words if word in non_english_words)
+        
+        # If more than 10% of words are from non-English common words, consider it non-English
+        if len(words) > 5 and non_english_count / len(words) > 0.1:
+            return True
             
-        return normalized
-    
+        # Check for common non-English characters: ä, ö, ü, é, è, ê, ñ, etc.
+        non_english_chars = 'äöüßéèêëàâçñøåæœÿòùìíîïðúû'
+        if any(c in non_english_chars for c in text.lower()):
+            return True
+            
+        return False
+
     def _extract_field(self, data, possible_keys, default=None):
         """Extract a field value from a dictionary using multiple possible keys."""
         if not data or not isinstance(data, dict):
