@@ -1017,25 +1017,57 @@ class TenderTrailIntegration:
         if not html_content:
             return ""
             
+        # Check if it's already plain text (no HTML)
+        if '<' not in html_content and '&' not in html_content:
+            return html_content.strip()
+            
         # Replace common HTML entities
-        html_content = html_content.replace("&nbsp;", " ")
-        html_content = html_content.replace("&amp;", "&")
-        html_content = html_content.replace("&lt;", "<")
-        html_content = html_content.replace("&gt;", ">")
-        html_content = html_content.replace("&quot;", "\"")
-        html_content = html_content.replace("&#39;", "'")
+        entities = {
+            '&nbsp;': ' ', '&amp;': '&', '&lt;': '<', '&gt;': '>', 
+            '&quot;': '"', '&#39;': "'", '&apos;': "'", '&ndash;': '-', 
+            '&mdash;': '—', '&rsquo;': "'", '&lsquo;': "'", '&ldquo;': '"', 
+            '&rdquo;': '"', '&#160;': ' ', '&#8211;': '-', '&#8212;': '—',
+            '&#8216;': "'", '&#8217;': "'", '&#8220;': '"', '&#8221;': '"',
+            '&shy;': '', '&bull;': '•', '&middot;': '·', '&hellip;': '...',
+            '&copy;': '©', '&reg;': '®', '&trade;': '™', '&euro;': '€',
+            '&pound;': '£', '&yen;': '¥', '&cent;': '¢', '&sect;': '§',
+            '&deg;': '°', '&plusmn;': '±', '&sup2;': '²', '&sup3;': '³',
+            '&micro;': 'µ', '&para;': '¶', '&aacute;': 'á', '&eacute;': 'é',
+            '&iacute;': 'í', '&oacute;': 'ó', '&uacute;': 'ú', '&ntilde;': 'ñ'
+        }
         
-        # Replace <br>, <p>, <div> tags with newlines
-        html_content = re.sub(r'<br\s*/?>|</p>|</div>', '\n', html_content)
+        for entity, replacement in entities.items():
+            html_content = html_content.replace(entity, replacement)
+            
+        # Also handle numeric entities
+        html_content = re.sub(r'&#(\d+);', lambda m: chr(int(m.group(1))), html_content)
         
-        # Replace multiple newlines with a single newline
-        html_content = re.sub(r'\n\s*\n', '\n\n', html_content)
+        # Replace block elements with newlines
+        html_content = re.sub(r'</(p|div|h\d|table|tr|ul|ol|li|blockquote)>', '\n', html_content, flags=re.IGNORECASE)
         
-        # Remove all HTML tags
+        # Replace break tags with newlines
+        html_content = re.sub(r'<br\s*/?>|<hr\s*/?>|<br>', '\n', html_content, flags=re.IGNORECASE)
+        
+        # Remove all remaining HTML tags
         html_content = re.sub(r'<[^>]*>', '', html_content)
         
-        # Clean up extra spaces
-        html_content = re.sub(r' +', ' ', html_content)
+        # Fix whitespace issues
+        html_content = re.sub(r' +', ' ', html_content)        # Multiple spaces to single space
+        html_content = re.sub(r'(\n\s*)+', '\n\n', html_content)  # Multiple newlines to double newline
+        html_content = re.sub(r'^\s+', '', html_content)       # Remove leading whitespace
+        html_content = re.sub(r'\s+$', '', html_content)       # Remove trailing whitespace
+        
+        # Decode URL-encoded characters
+        html_content = html_content.replace('%20', ' ')
+        html_content = html_content.replace('%27', "'")
+        html_content = html_content.replace('%22', '"')
+        html_content = html_content.replace('%2C', ',')
+        html_content = html_content.replace('%2F', '/')
+        html_content = html_content.replace('%3A', ':')
+        html_content = html_content.replace('%3B', ';')
+        html_content = html_content.replace('%3D', '=')
+        html_content = html_content.replace('%3F', '?')
+        html_content = html_content.replace('%40', '@')
         
         return html_content.strip()
         
@@ -1082,8 +1114,16 @@ class TenderTrailIntegration:
             return value
             
         if isinstance(value, str):
-            # Try to extract numeric value from string using regex
-            matches = re.search(r'([\d,]+\.?\d*|\d*\.?\d+)', value)
+            # Remove currency symbols and other non-numeric characters
+            cleaned = value.strip()
+            
+            # Remove known currency symbols
+            for symbol in ['$', '€', '£', '¥', '₹', 'USD', 'EUR', 'GBP', 'JPY', 'CHF', 'CAD', 'AUD', 'INR', 'CNY', 'ZAR']:
+                cleaned = cleaned.replace(symbol, '')
+            
+            # Try to extract numeric value using different patterns
+            # Pattern 1: Simple numbers (123,456.78)
+            matches = re.search(r'([\d,]+\.?\d*|\d*\.?\d+)', cleaned)
             if matches:
                 # Extract the matched part and remove commas
                 number_str = matches.group(1).replace(',', '')
@@ -1092,6 +1132,52 @@ class TenderTrailIntegration:
                 except ValueError:
                     pass
                     
+            # Pattern 2: Look for values with million/billion indicators
+            matches = re.search(r'(\d+\.?\d*)\s*(million|m|billion|b)', cleaned.lower())
+            if matches:
+                num = float(matches.group(1))
+                multiplier = matches.group(2)
+                if multiplier in ['million', 'm']:
+                    return num * 1000000
+                elif multiplier in ['billion', 'b']:
+                    return num * 1000000000
+                    
+            # Pattern 3: Look for ranges and take the higher value
+            matches = re.search(r'(\d+\.?\d*)[^\d]+(\d+\.?\d*)', cleaned)
+            if matches:
+                try:
+                    val1 = float(matches.group(1))
+                    val2 = float(matches.group(2))
+                    return max(val1, val2)
+                except ValueError:
+                    pass
+                    
+        # Check if description has financial info
+        if hasattr(self, 'current_tender') and isinstance(self.current_tender, dict):
+            desc = self.current_tender.get('description', '')
+            if isinstance(desc, str) and desc:
+                # Look for patterns like "$X million" or "X million dollars"
+                money_patterns = [
+                    r'\$\s*(\d+\.?\d*)\s*(million|m|billion|b)',
+                    r'(\d+\.?\d*)\s*(million|m|billion|b)\s*(dollars|usd|euro|eur|pound|gbp)',
+                    r'budget of\s*[\$\€\£]?\s*(\d+\.?\d*)\s*(million|m|billion|b)?',
+                    r'estimated (?:cost|value|amount|price).{1,20}[\$\€\£]?\s*(\d+\.?\d*)\s*(million|m|billion|b)?',
+                    r'contract value.{1,20}[\$\€\£]?\s*(\d+\.?\d*)\s*(million|m|billion|b)?'
+                ]
+                
+                for pattern in money_patterns:
+                    matches = re.search(pattern, desc.lower())
+                    if matches:
+                        num = float(matches.group(1))
+                        try:
+                            if matches.group(2) and matches.group(2) in ['million', 'm']:
+                                num *= 1000000
+                            elif matches.group(2) and matches.group(2) in ['billion', 'b']:
+                                num *= 1000000000
+                        except IndexError:
+                            pass
+                        return num
+                        
         return None
         
     def _extract_currency(self, value):
@@ -1102,43 +1188,219 @@ class TenderTrailIntegration:
         # Common currency symbols and their codes
         currency_map = {
             '$': 'USD',
-            '€': 'EUR',
-            '£': 'GBP',
-            '¥': 'JPY',
-            '₹': 'INR',
+            'US$': 'USD', 
             'USD': 'USD',
+            '€': 'EUR',
             'EUR': 'EUR',
+            '£': 'GBP',
             'GBP': 'GBP',
+            '¥': 'JPY',
             'JPY': 'JPY',
+            '₹': 'INR',
+            'INR': 'INR',
             'CHF': 'CHF',
             'CAD': 'CAD',
             'AUD': 'AUD',
-            'INR': 'INR',
             'CNY': 'CNY',
             'ZAR': 'ZAR'
         }
         
         if isinstance(value, str):
+            value = value.strip()
+            
             # First check for currency codes or symbols at the start
             for symbol, code in currency_map.items():
-                if value.strip().startswith(symbol):
+                if value.startswith(symbol):
                     return code
                     
             # Look for currency names in the string
             value_lower = value.lower()
             for name, code in {
                 'dollar': 'USD',
+                'usd': 'USD',
+                'us dollar': 'USD',
                 'euro': 'EUR',
+                'eur': 'EUR',
                 'pound': 'GBP',
+                'gbp': 'GBP',
                 'yen': 'JPY',
+                'jpy': 'JPY',
                 'rupee': 'INR',
+                'inr': 'INR',
                 'yuan': 'CNY',
+                'cny': 'CNY',
                 'rand': 'ZAR',
-                'franc': 'CHF'
+                'zar': 'ZAR',
+                'franc': 'CHF',
+                'chf': 'CHF'
             }.items():
                 if name in value_lower:
                     return code
                     
+        # Check description for currency mentions
+        if hasattr(self, 'current_tender') and isinstance(self.current_tender, dict):
+            desc = self.current_tender.get('description', '')
+            if isinstance(desc, str) and desc:
+                desc_lower = desc.lower()
+                
+                # Look for currency symbols at position 0 or close to numbers
+                for symbol, code in currency_map.items():
+                    if symbol in desc:
+                        return code
+                        
+                # Look for currency names in context of amounts
+                for name, code in {
+                    'dollar': 'USD',
+                    'usd': 'USD',
+                    'euro': 'EUR',
+                    'eur': 'EUR',
+                    'pound sterling': 'GBP',
+                    'pound': 'GBP', 
+                    'gbp': 'GBP'
+                }.items():
+                    if name in desc_lower and re.search(r'\d+\s*' + name, desc_lower):
+                        return code
+                        
+            # If description has budget keywords, default to USD for US agencies
+            if self.current_tender.get('source') in ['sam_gov', 'usaid'] and re.search(r'budget|amount|cost|value', desc_lower):
+                return 'USD'
+                
+        # Default currency based on source country
+        country_currency = {
+            'United States': 'USD',
+            'USA': 'USD',
+            'EU': 'EUR',
+            'United Kingdom': 'GBP',
+            'UK': 'GBP', 
+            'Japan': 'JPY',
+            'India': 'INR',
+            'Switzerland': 'CHF',
+            'Canada': 'CAD',
+            'Australia': 'AUD',
+            'China': 'CNY',
+            'South Africa': 'ZAR'
+        }
+        
+        if hasattr(self, 'current_tender') and isinstance(self.current_tender, dict):
+            country = self.current_tender.get('country')
+            if country in country_currency:
+                return country_currency[country]
+                
+        return None
+
+    def _extract_categories(self, text, source_name=None):
+        """Extract standardized categories from text."""
+        if not text:
+            return []
+            
+        # Common procurement categories by domain
+        category_keywords = {
+            "construction": ["construction", "building", "infrastructure", "renovation", "civil works", 
+                            "roads", "bridges", "facilities", "maintenance", "repair"],
+            "it_services": ["it", "software", "hardware", "computer", "digital", "technology", "ict", 
+                          "information technology", "system", "network", "programming", "website", 
+                          "application", "database", "cloud", "security", "data", "automation"],
+            "consulting": ["consulting", "consultancy", "advisory", "technical assistance", 
+                         "expert", "specialist", "professional services", "expertise"],
+            "healthcare": ["health", "medical", "hospital", "clinic", "pharmaceutical", "medicine", 
+                         "doctor", "nurse", "healthcare", "patient", "treatment", "diagnostic"],
+            "education": ["education", "training", "teaching", "school", "university", "academic", 
+                        "learning", "educational", "curriculum", "e-learning", "capacity building"],
+            "financial": ["financial", "banking", "insurance", "accounting", "audit", "finance", 
+                        "investment", "economic", "fiscal", "monetary", "budget"],
+            "agriculture": ["agriculture", "farming", "crops", "livestock", "irrigation", "rural", 
+                          "agricultural", "food security", "agribusiness", "agro"],
+            "energy": ["energy", "electricity", "power", "renewable", "solar", "wind", "hydro", 
+                     "gas", "oil", "electrical", "utility", "utilities"],
+            "environment": ["environment", "environmental", "sustainability", "sustainable", 
+                          "climate", "green", "conservation", "water", "sanitation", "waste"],
+            "transportation": ["transport", "transportation", "logistics", "road", "railway", 
+                             "aviation", "maritime", "vehicle", "fleet", "shipping", "freight"],
+            "security": ["security", "defense", "military", "police", "surveillance", 
+                       "protection", "safety", "emergency", "disaster"],
+            "telecommunications": ["telecom", "telecommunications", "communication", "mobile", 
+                                 "broadband", "internet", "wireless", "fiber", "satellite"]
+        }
+        
+        text_lower = text.lower()
+        found_categories = []
+        
+        # Check for keywords in text
+        for category, keywords in category_keywords.items():
+            for keyword in keywords:
+                if keyword in text_lower:
+                    found_categories.append(category)
+                    break
+                    
+        # Source-specific categories
+        if source_name == "ted_eu" and "services" in text_lower:
+            found_categories.append("services")
+            
+        if source_name == "sam_gov" and "supplies" in text_lower:
+            found_categories.append("supplies")
+            
+        # If no categories found, use "other"
+        if not found_categories:
+            return ["other"]
+            
+        # Remove duplicates and sort
+        return sorted(list(set(found_categories)))
+        
+    def _extract_deadline_date(self, tender, default_days=30):
+        """Extract closing/deadline date with fallbacks."""
+        # Try direct field extraction first
+        date_fields = [
+            "closing_date", "deadline", "deadline_date", "response_date", 
+            "pue_date", "end_date", "expiry_date", "due_date"
+        ]
+        
+        for field in date_fields:
+            if tender.get(field):
+                formatted = self._format_date(tender.get(field))
+                if formatted:
+                    return formatted
+        
+        # Try to find deadline in the description
+        if isinstance(tender.get("description"), str):
+            desc = tender.get("description").lower()
+            
+            # Look for specific date patterns
+            # Format: DD Month YYYY
+            date_match = re.search(r'(deadline|due|closing|submission).{1,30}?(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(\d{4})', desc)
+            if date_match:
+                day = int(date_match.group(2))
+                month_str = date_match.group(3)
+                year = int(date_match.group(4))
+                
+                month_map = {
+                    'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+                    'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
+                }
+                
+                month = month_map.get(month_str[:3].lower())
+                if month:
+                    try:
+                        import datetime
+                        closing_date = datetime.date(year, month, day)
+                        return closing_date.strftime('%Y-%m-%d')
+                    except ValueError:
+                        pass
+        
+        # If publication date exists, default to publication date + default_days
+        pub_date = tender.get("publication_date") or tender.get("publish_date") or tender.get("date_published") or tender.get("date")
+        if pub_date:
+            formatted_pub_date = self._format_date(pub_date)
+            if formatted_pub_date:
+                try:
+                    import datetime
+                    from dateutil import parser
+                    
+                    pub_date_obj = parser.parse(formatted_pub_date)
+                    closing_date = pub_date_obj + datetime.timedelta(days=default_days)
+                    return closing_date.strftime('%Y-%m-%d')
+                except (ValueError, ImportError):
+                    pass
+        
         return None
         
     def _normalize_tender(self, tender, source_name=None):
@@ -1163,6 +1425,9 @@ class TenderTrailIntegration:
             print(f"Warning: Unsupported tender type: {type(tender)}")
             return None
 
+        # Store reference to the current tender for value extraction
+        self.current_tender = tender
+            
         # Set source if provided
         if source_name and not tender.get("source"):
             tender["source"] = source_name
@@ -1217,7 +1482,10 @@ class TenderTrailIntegration:
                     "KOR": "South Korea",
                     "SGP": "Singapore",
                     "AFG": "Afghanistan",
-                    "SLE": "Sierra Leone"
+                    "SLE": "Sierra Leone",
+                    "PAK": "Pakistan",
+                    "SDN": "Sudan",
+                    "TZA": "Tanzania"
                 }
                 country = country_map.get(country_code, country_code)
             elif isinstance(place.get("country"), str):
@@ -1252,8 +1520,33 @@ class TenderTrailIntegration:
         
         # Clean description if it contains HTML
         description = normalized_tender["description"]
-        if description and ("<" in description and ">" in description):
+        if description:
             normalized_tender["description"] = self._clean_html(description)
+
+        # Extract contact information from description if not already present
+        if not normalized_tender["contact_email"] and normalized_tender["description"]:
+            # Look for email addresses
+            email_match = re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', normalized_tender["description"])
+            if email_match:
+                normalized_tender["contact_email"] = email_match.group(0)
+                
+        # Extract phone numbers if not already present
+        if not normalized_tender["contact_phone"] and normalized_tender["description"]:
+            # Common phone number patterns
+            phone_match = re.search(r'(?:\+\d{1,3}[-\s]?)?\(?\d{3}\)?[-\s]?\d{3}[-\s]?\d{4}', normalized_tender["description"])
+            if phone_match:
+                normalized_tender["contact_phone"] = phone_match.group(0)
+                
+        # Extract categories from title and description
+        if not normalized_tender["categories"]:
+            combined_text = (normalized_tender["notice_title"] or "") + " " + (normalized_tender["description"] or "")
+            categories = self._extract_categories(combined_text, source_name)
+            if categories:
+                normalized_tender["categories"] = categories
+                
+        # Try to extract or infer deadline if not set
+        if not normalized_tender["closing_date"]:
+            normalized_tender["closing_date"] = self._extract_deadline_date(tender)
 
         # Store the raw data for reference
         normalized_tender["metadata"] = {
@@ -1312,6 +1605,9 @@ class TenderTrailIntegration:
                 normalized_tender["metadata"]["original_issuing_authority"] = original_auth
                 normalized_tender["issuing_authority"] = translated_auth
 
+        # Clear the current tender reference
+        self.current_tender = None
+                
         return normalized_tender
         
     def _detect_non_english(self, text):
