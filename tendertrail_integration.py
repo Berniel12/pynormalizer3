@@ -796,193 +796,140 @@ class TenderTrailIntegration:
         
         return processed_tenders
     
-    def _insert_normalized_tenders(self, normalized_tenders, create_tables=True):
-        """Insert normalized tenders into the database."""
+    def _insert_normalized_tenders(self, normalized_tenders, create_tables=False):
+        """
+        Insert normalized tenders into the unified database.
+        
+        Args:
+            normalized_tenders (list): List of normalized tenders to insert
+            create_tables (bool): Whether to create tables if they don't exist
+        
+        Returns:
+            int: Number of inserted tenders
+        """
         if not normalized_tenders:
             return 0
-
-        # Batch size for insert operations
-        batch_size = 10
-        
-        # Handle case where a single tender is passed
-        if isinstance(normalized_tenders, dict):
-            normalized_tenders = [normalized_tenders]
             
         print(f"Preparing to insert {len(normalized_tenders)} tenders")
+        batch_size = 10  # Insert in smaller batches to avoid timeouts
         
-        # Check if translation capability is available
-        translation_available = False
-        try:
-            from deep_translator import GoogleTranslator
-            translation_available = True
-            print("Translation capability is available")
-        except ImportError:
-            print("Warning: deep_translator not available, skipping translation")
-            
-        # Convert metadata to JSON strings if they are dictionaries
-        for tender in normalized_tenders:
-            if 'metadata' in tender and isinstance(tender['metadata'], dict):
-                tender['metadata'] = json.dumps(tender['metadata'])
-                
-        # Check if unified_tenders table exists and has metadata column
-        has_metadata_column = False
-        try:
-            table_info = self.supabase.table('unified_tenders').select('*').limit(1).execute()
-            # Check if the response structure indicates table exists
-            if hasattr(table_info, 'data') and isinstance(table_info.data, list):
-                # Check if any row was returned
-                if table_info.data and isinstance(table_info.data[0], dict):
-                    # Check if metadata column exists
-                    has_metadata_column = 'metadata' in table_info.data[0]
-                    print(f"Metadata column {'exists' if has_metadata_column else 'does not exist'} in unified_tenders table")
-        except Exception as e:
-            if create_tables:
-                print(f"Error checking unified_tenders table: {e}")
-                print("Will attempt to create table")
-            else:
-                print(f"Error checking unified_tenders table and create_tables=False: {e}")
-                return 0
-                
-        # If table doesn't exist and create_tables is True, create it
-        if create_tables:
+        # Initialize translator if needed
+        if self.translator is None and self.translation_available:
             try:
-                # Create unified_tenders table if it doesn't exist
-                create_table_query = """
-                CREATE TABLE IF NOT EXISTS unified_tenders (
-                    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                    title TEXT,
-                    description TEXT,
-                    date_published TIMESTAMP,
-                    closing_date TIMESTAMP,
-                    tender_value NUMERIC,
-                    tender_currency TEXT,
-                    location TEXT,
-                    issuing_authority TEXT,
-                    keywords TEXT,
-                    tender_type TEXT,
-                    project_size TEXT,
-                    contact_information TEXT,
-                    source TEXT,
-                    raw_id TEXT,
-                    processed_at TIMESTAMP DEFAULT NOW(),
-                    created_at TIMESTAMP DEFAULT NOW(),
-                    metadata JSONB
-                );
-                -- Add extension for UUID generation if not exists
-                CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-                """
-                
-                # Execute SQL directly - this might fail if we don't have table creation permissions
-                try:
-                    # Use a raw SQL query to ensure the table exists
-                    response = self.supabase.rpc('exec_sql', {'query': create_table_query}).execute()
-                    print("Created or verified unified_tenders table")
-                except Exception as e:
-                    print(f"Warning: Could not create table using exec_sql RPC: {e}")
-                    print("Will attempt to insert data assuming table exists")
-            except Exception as e:
-                print(f"Error creating table: {e}")
-                # Continue and try to insert anyway
+                from deep_translator import GoogleTranslator
+                self.translator = GoogleTranslator(source='auto', target='en')
+                print("Translation capability is available")
+            except ImportError:
+                self.translation_available = False
+                print("Translation capability not available")
         
-        # Prepare data by mapping normalized tender fields to database columns
-        db_records = []
+        # Initialize Supabase client if needed
+        if not self.supabase:
+            self._init_supabase_client()
+            
+        # Prepare records for insertion
+        records = []
+        
         for tender in normalized_tenders:
-            # Create a basic record with required fields
+            if not tender:
+                continue
+                
+            # Convert metadata to JSON string if it's a dictionary
+            if isinstance(tender.get('metadata'), dict):
+                # Move country from main object to metadata if it exists
+                if tender.get('country'):
+                    tender['metadata']['country'] = tender.get('country')
+                # Convert to JSON string
+                tender['metadata'] = json.dumps(tender['metadata'])
+            
+            # Check if the table exists and has the required metadata field
+            try:
+                if create_tables:
+                    # Create table if needed - only attempt once to avoid repeated errors
+                    create_table_sql = """
+                    CREATE TABLE IF NOT EXISTS unified_tenders (
+                        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                        title TEXT,
+                        description TEXT,
+                        date_published DATE,
+                        closing_date DATE,
+                        tender_value NUMERIC,
+                        tender_currency TEXT,
+                        location TEXT,
+                        issuing_authority TEXT,
+                        keywords TEXT[],
+                        tender_type TEXT,
+                        project_size TEXT,
+                        contact_information TEXT,
+                        source TEXT,
+                        raw_id TEXT,
+                        processed_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        metadata JSONB
+                    );
+                    CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+                    """
+                    # Try to execute SQL directly using RPC if available
+                    result = self.supabase.rpc('exec_sql', {'query': create_table_sql}).execute()
+                    if hasattr(result, 'error') and result.error:
+                        print(f"Warning: Could not create table using exec_sql RPC: {result.error}")
+                        print("Will attempt to insert data assuming table exists")
+                    else:
+                        print("Created unified_tenders table if it didn't exist")
+            except Exception as e:
+                print(f"Warning: Could not create table: {str(e)}")
+                print("Will attempt to insert data assuming table exists")
+            
+            # Map normalized tender fields to database columns
             record = {
-                # Map normalized tender fields to database columns
-                "title": tender.get("notice_title", "Untitled Tender"),  # title field in DB maps to notice_title 
-                "source": tender.get("source", "unknown"),
-                "description": tender.get("description", ""),
-                "issuing_authority": tender.get("issuing_authority", ""),
-                "location": tender.get("location", ""),
-                "date_published": tender.get("date_published"),
-                "closing_date": tender.get("closing_date"),
-                "tender_value": tender.get("tender_value"),
-                "tender_currency": tender.get("currency", ""),  # Map currency to tender_currency
-                "tender_type": tender.get("notice_type", ""),
-                "contact_information": f"{tender.get('contact_email', '')} {tender.get('contact_phone', '')}".strip(),
-                "keywords": "",  # Will be generated from description later if needed
-                "metadata": tender.get("metadata", "{}")
+                'title': tender.get('notice_title', '').strip(),
+                'description': tender.get('description', ''),
+                'date_published': tender.get('date_published'),
+                'closing_date': tender.get('closing_date'),
+                'tender_value': tender.get('tender_value'),
+                'tender_currency': tender.get('currency'),
+                'location': tender.get('location'),
+                'issuing_authority': tender.get('issuing_authority'),
+                'tender_type': tender.get('notice_type'),
+                'contact_information': ', '.join(filter(None, [
+                    tender.get('contact_email'),
+                    tender.get('contact_phone')
+                ])),
+                'source': tender.get('source'),
+                'raw_id': tender.get('notice_id'),
+                'metadata': tender.get('metadata'),
+                'keywords': []  # Initialize empty array for keywords
             }
             
-            # Store non-matching fields in metadata
-            fields_for_metadata = ["categories", "bid_reference_no", "country", "contact_email", "contact_phone", "currency", "url"]
-            metadata_dict = {}
-            
-            # Parse existing metadata if it's a string
-            if isinstance(record["metadata"], str):
+            # Try to translate description if it's not in English, but don't fail if it doesn't work
+            if self.translation_available and record['description'] and len(record['description']) > 0:
                 try:
-                    metadata_dict = json.loads(record["metadata"])
-                except:
-                    metadata_dict = {}
-            else:
-                metadata_dict = record["metadata"]
-                
-            # Add fields to metadata
-            for field in fields_for_metadata:
-                if tender.get(field):
-                    metadata_dict[field] = tender.get(field)
-                    
-            # Convert metadata back to string if needed
-            record["metadata"] = json.dumps(metadata_dict) if isinstance(record["metadata"], dict) else record["metadata"]
-            
-            # Translate title and description if needed and translation is available
-            if translation_available and record["description"]:
-                try:
-                    # Only translate if not already in English and content is meaningful
-                    if len(record["description"]) > 10:
-                        # Check if we've already translated this content
-                        cache_key = f"{record['source']}:{hash(record['description'][:100])}"
-                        if cache_key in self.translation_cache:
-                            record["description"] = self.translation_cache[cache_key]
-                        else:
-                            # Attempt translation
-                            translator = GoogleTranslator(source='auto', target='en')
-                            # Split into chunks if needed (API limits)
-                            if len(record["description"]) > 5000:
-                                chunks = [record["description"][i:i+4500] for i in range(0, len(record["description"]), 4500)]
-                                translated_chunks = []
-                                for chunk in chunks:
-                                    try:
-                                        translated = translator.translate(chunk)
-                                        translated_chunks.append(translated)
-                                    except Exception as e:
-                                        print(f"Translation error: {e}")
-                                        translated_chunks.append(chunk)  # Use original on error
-                                record["description"] = " ".join(translated_chunks)
-                            else:
-                                try:
-                                    translated = translator.translate(record["description"])
-                                    record["description"] = translated
-                                except Exception as e:
-                                    print(f"Translation error: {e}")
-                            
-                            # Store in cache
-                            self.translation_cache[cache_key] = record["description"]
+                    if self._detect_non_english(record['description']):
+                        original_desc = record['description']
+                        translated_desc = self._translate_text(original_desc)
+                        if translated_desc and translated_desc != original_desc:
+                            record['description'] = translated_desc
                 except Exception as e:
-                    print(f"Translation error: {e}")
+                    print(f"Error during description translation: {str(e)[:100]}...")
+                    # Continue with original description if translation fails
             
-            db_records.append(record)
+            records.append(record)
         
         # Insert records in batches
         inserted_count = 0
-        batches = [db_records[i:i+batch_size] for i in range(0, len(db_records), batch_size)]
-        
-        for i, batch in enumerate(batches, 1):
+        for i in range(0, len(records), batch_size):
+            batch = records[i:i+batch_size]
+            print(f"Inserting batch {i//batch_size + 1}/{len(records)//batch_size + (1 if len(records) % batch_size > 0 else 0)}")
+            
             try:
-                print(f"Inserting batch {i}/{len(batches)}")
-                response = self.supabase.table('unified_tenders').insert(batch).execute()
-                
-                # Check if the insertion was successful
-                if response and hasattr(response, 'data') and isinstance(response.data, list):
-                    inserted_count += len(response.data)
-                    print(f"Successfully inserted batch with {len(response.data)} tenders")
+                result = self.supabase.table('unified_tenders').insert(batch).execute()
+                if hasattr(result, 'error') and result.error:
+                    print(f"Error inserting batch: {result.error}")
                 else:
-                    print(f"Warning: Unexpected response format from insert operation: {response}")
+                    inserted_count += len(batch)
+                    print(f"Successfully inserted batch with {len(batch)} tenders")
             except Exception as e:
-                print(f"Error inserting batch: {e}")
-                traceback.print_exc()
-                # Continue with the next batch
+                print(f"Error inserting batch: {str(e)[:100]}...")
         
         print(f"Successfully inserted {inserted_count} out of {len(normalized_tenders)} tenders")
         return inserted_count
