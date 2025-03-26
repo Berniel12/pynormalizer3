@@ -1116,7 +1116,12 @@ class TenderTrailIntegration:
 
         # Ensure at least a default title exists
         if not normalized_tender["notice_title"]:
-            normalized_tender["notice_title"] = "Untitled Tender"
+            normalized_tender["notice_title"] = f"Untitled Tender from {source_name}"
+        
+        # Clean description if it contains HTML
+        description = normalized_tender["description"]
+        if description and ("<" in description and ">" in description):
+            normalized_tender["description"] = self._clean_html(description)
 
         # Store the raw data for reference
         normalized_tender["metadata"] = {
@@ -1128,74 +1133,64 @@ class TenderTrailIntegration:
             "processed": tender.get("processed", False)
         }
 
-        # Try to translate non-English titles and descriptions
-        try:
-            # Initialize translation if needed
-            if self.translator is None and self.translation_available:
-                try:
-                    from deep_translator import GoogleTranslator
-                    self.translator = GoogleTranslator(source='auto', target='en')
-                    self.translation_cache = {}
-                except ImportError:
-                    self.translation_available = False
-                    print("Translation capability not available")
+        # Initialize translation if needed
+        if self.translator is None and self.translation_available:
+            try:
+                from deep_translator import GoogleTranslator
+                self.translator = GoogleTranslator(source='auto', target='en')
+                self.translation_cache = {}
+            except ImportError:
+                self.translation_available = False
+                print("Translation capability not available")
 
-            # Translate title if it's not in English and translation is available
-            if self.translation_available and normalized_tender["notice_title"]:
-                # Check if title appears to be non-English (simple heuristic based on common characters)
-                title = normalized_tender["notice_title"]
-                # Check for non-English characters (simple heuristic)
-                if any(ord(c) > 127 for c in title) or self._detect_non_english(title):
-                    # Use cache to avoid duplicate translations
-                    cache_key = f"title:{hash(title)}"
-                    if cache_key in self.translation_cache:
-                        normalized_tender["notice_title"] = self.translation_cache[cache_key]
-                    else:
-                        try:
-                            translated_title = self.translator.translate(title)
-                            if translated_title and translated_title != title:
-                                normalized_tender["metadata"]["original_title"] = title
-                                normalized_tender["notice_title"] = translated_title
-                                self.translation_cache[cache_key] = translated_title
-                        except Exception as e:
-                            print(f"Title translation error: {e}")
+        # Translate title if it contains non-English content
+        if normalized_tender["notice_title"]:
+            original_title = normalized_tender["notice_title"]
+            translated_title = self._translate_text(original_title)
+            if translated_title != original_title:
+                normalized_tender["metadata"]["original_title"] = original_title
+                normalized_tender["notice_title"] = translated_title
+                print(f"Translated title from: '{original_title[:30]}...' to '{translated_title[:30]}...'")
 
-            # Translate description if it's not in English and translation is available
-            if self.translation_available and normalized_tender["description"]:
-                description = normalized_tender["description"]
-                # Check for non-English characters or typical markers
-                if any(ord(c) > 127 for c in description) or self._detect_non_english(description):
-                    # Use cache to avoid duplicate translations
-                    cache_key = f"desc:{hash(description[:100])}"
-                    if cache_key in self.translation_cache:
-                        normalized_tender["description"] = self.translation_cache[cache_key]
-                    else:
-                        try:
-                            # For long descriptions, break into chunks (API limits)
-                            if len(description) > 5000:
-                                chunks = [description[i:i+4500] for i in range(0, len(description), 4500)]
-                                translated_chunks = []
-                                for chunk in chunks:
-                                    translated = self.translator.translate(chunk)
-                                    translated_chunks.append(translated)
-                                translated_desc = " ".join(translated_chunks)
-                            else:
-                                translated_desc = self.translator.translate(description)
-                            
-                            if translated_desc and translated_desc != description:
-                                normalized_tender["metadata"]["original_description"] = description
-                                normalized_tender["description"] = translated_desc
-                                self.translation_cache[cache_key] = translated_desc
-                        except Exception as e:
-                            print(f"Description translation error: {e}")
-                            
-        except Exception as e:
-            print(f"Translation processing error: {e}")
+        # Translate description if it contains non-English content
+        if normalized_tender["description"]:
+            description = normalized_tender["description"]
+            if "<" in description and ">" in description:
+                # Handle HTML content
+                original_desc = description
+                translated_desc = self._translate_html(description)
+                if translated_desc != original_desc:
+                    normalized_tender["metadata"]["original_description"] = original_desc
+                    normalized_tender["description"] = translated_desc
+                    print(f"Translated HTML description: {len(original_desc)} chars to {len(translated_desc)} chars")
+            else:
+                # Plain text description
+                original_desc = description
+                translated_desc = self._translate_text(description)
+                if translated_desc != original_desc:
+                    normalized_tender["metadata"]["original_description"] = original_desc
+                    normalized_tender["description"] = translated_desc
+                    print(f"Translated description: {len(original_desc)} chars to {len(translated_desc)} chars")
+
+        # Translate issuing authority if needed
+        if normalized_tender["issuing_authority"] and self._detect_non_english(normalized_tender["issuing_authority"]):
+            original_auth = normalized_tender["issuing_authority"]
+            translated_auth = self._translate_text(original_auth)
+            if translated_auth != original_auth:
+                normalized_tender["metadata"]["original_issuing_authority"] = original_auth
+                normalized_tender["issuing_authority"] = translated_auth
 
         return normalized_tender
         
     def _detect_non_english(self, text):
         """Detect if text is likely not English based on common words and patterns."""
+        if not text or len(text) < 5:
+            return False
+            
+        # Simple fast check for non-ASCII characters
+        if any(ord(c) > 127 for c in text):
+            return True
+            
         # List of common words in various European languages that aren't English words
         non_english_words = [
             # German
@@ -1209,17 +1204,24 @@ class TenderTrailIntegration:
             # Portuguese
             'o', 'a', 'os', 'as', 'um', 'uma', 'uns', 'umas', 'e', 'ou', 'mas', 'porque', 'como',
             # Dutch
-            'de', 'het', 'een', 'en', 'van', 'voor', 'met', 'op', 'in', 'is', 'zijn', 'niet'
+            'de', 'het', 'een', 'en', 'van', 'voor', 'met', 'op', 'in', 'is', 'zijn', 'niet',
+            # Special foreign-language markers
+            'gmbh', 'mbh', 'sarl', 'bvba', 'sprl', 'ltda', 'aménagement', 'amélioration', 'développement',
+            'adquisición', 'suministro', 'construcción', 'rehabilitación'
         ]
         
         # Convert text to lowercase and split into words
         words = re.findall(r'\b\w+\b', text.lower())
         
+        if not words:
+            return False
+            
         # Count how many words match non-English common words
         non_english_count = sum(1 for word in words if word in non_english_words)
         
-        # If more than 10% of words are from non-English common words, consider it non-English
-        if len(words) > 5 and non_english_count / len(words) > 0.1:
+        # If more than 5% of words are from non-English common words, consider it non-English
+        # Lower threshold to catch more cases
+        if len(words) > 5 and non_english_count / len(words) > 0.05:
             return True
             
         # Check for common non-English characters: ä, ö, ü, é, è, ê, ñ, etc.
@@ -1802,3 +1804,105 @@ class TenderTrailIntegration:
         """Get current timestamp in ISO format."""
         import datetime
         return datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    def _translate_text(self, text, max_chunk_size=4000):
+        """Translate text from any language to English with chunking for long content"""
+        if not text or not self.translation_available or not self.translator:
+            return text
+            
+        try:
+            # Handle empty or very short text
+            if not text or len(text) < 5:
+                return text
+                
+            # Check if translation is needed
+            if not self._detect_non_english(text):
+                return text
+                
+            # Use cache to avoid duplicate translations
+            cache_key = f"txt:{hash(text[:100])}"
+            if cache_key in self.translation_cache:
+                return self.translation_cache[cache_key]
+                
+            # For long texts, break into chunks (API limits)
+            if len(text) > max_chunk_size:
+                # Split by paragraphs to maintain semantic units
+                chunks = []
+                paragraphs = re.split(r'(\r?\n\r?\n|\<\/p\>)', text)
+                current_chunk = ""
+                
+                for para in paragraphs:
+                    if len(current_chunk) + len(para) > (max_chunk_size * 0.9):  # 90% of limit
+                        chunks.append(current_chunk)
+                        current_chunk = para
+                    else:
+                        current_chunk += para
+                        
+                # Add the last chunk if not empty
+                if current_chunk:
+                    chunks.append(current_chunk)
+                
+                # Translate each chunk
+                translated_chunks = []
+                for chunk in chunks:
+                    translated = self.translator.translate(chunk)
+                    if translated:
+                        translated_chunks.append(translated)
+                    else:
+                        translated_chunks.append(chunk)  # Fallback to original if translation fails
+                
+                result = "".join(translated_chunks)
+            else:
+                # Translate as a single piece
+                result = self.translator.translate(text)
+                
+            # Store in cache if successful
+            if result and result != text:
+                self.translation_cache[cache_key] = result
+                return result
+            
+            return text  # Return original if translation failed
+        except Exception as e:
+            print(f"Translation error: {str(e)[:100]}...")
+            return text
+            
+    def _translate_html(self, html_content):
+        """Extract and translate text from HTML content while preserving tags"""
+        if not html_content or not self.translation_available:
+            return html_content
+            
+        try:
+            # Simple check if translation might be needed
+            if not self._detect_non_english(html_content):
+                return html_content
+                
+            # Cache check 
+            cache_key = f"html:{hash(html_content[:100])}"
+            if cache_key in self.translation_cache:
+                return self.translation_cache[cache_key]
+            
+            # Simple HTML parser for paragraphs - will preserve most common tags
+            parts = re.split(r'(<[^>]*>)', html_content)
+            translated_parts = []
+            
+            for part in parts:
+                if part.startswith('<') and part.endswith('>'):
+                    # This is an HTML tag, don't translate
+                    translated_parts.append(part)
+                else:
+                    # This is content, translate it
+                    if part.strip():  # Only translate non-empty content
+                        translated_parts.append(self._translate_text(part))
+                    else:
+                        translated_parts.append(part)
+            
+            result = ''.join(translated_parts)
+            
+            # Store in cache if successful
+            if result and result != html_content:
+                self.translation_cache[cache_key] = result
+                
+            return result
+        except Exception as e:
+            print(f"HTML translation error: {str(e)[:100]}...")
+            return html_content
