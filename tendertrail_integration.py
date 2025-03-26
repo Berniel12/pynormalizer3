@@ -1012,6 +1012,135 @@ class TenderTrailIntegration:
             "language": "en"
         }
 
+    def _clean_html(self, html_content):
+        """Remove HTML tags and convert entities to get clean text."""
+        if not html_content:
+            return ""
+            
+        # Replace common HTML entities
+        html_content = html_content.replace("&nbsp;", " ")
+        html_content = html_content.replace("&amp;", "&")
+        html_content = html_content.replace("&lt;", "<")
+        html_content = html_content.replace("&gt;", ">")
+        html_content = html_content.replace("&quot;", "\"")
+        html_content = html_content.replace("&#39;", "'")
+        
+        # Replace <br>, <p>, <div> tags with newlines
+        html_content = re.sub(r'<br\s*/?>|</p>|</div>', '\n', html_content)
+        
+        # Replace multiple newlines with a single newline
+        html_content = re.sub(r'\n\s*\n', '\n\n', html_content)
+        
+        # Remove all HTML tags
+        html_content = re.sub(r'<[^>]*>', '', html_content)
+        
+        # Clean up extra spaces
+        html_content = re.sub(r' +', ' ', html_content)
+        
+        return html_content.strip()
+        
+    def _standardize_country(self, country):
+        """Standardize country names to proper case format."""
+        if not country:
+            return ""
+            
+        # Handle empty strings
+        country = country.strip()
+        if not country:
+            return ""
+            
+        # Already proper case, return as is
+        if not country.isupper() and not country.islower():
+            return country
+            
+        # Uppercase country codes that should remain uppercase
+        if len(country) <= 3 and country.isupper():
+            return country
+            
+        # Convert to proper case
+        words = country.split()
+        proper_case = []
+        
+        for word in words:
+            # Common country prefixes remain lowercase after first word
+            if word.lower() in ['of', 'the', 'and', 'de', 'del', 'da', 'dos'] and proper_case:
+                proper_case.append(word.lower())
+            # Special case for USA, UK, UAE, etc.
+            elif word.upper() in ['USA', 'UK', 'UAE', 'EU', 'DRC']:
+                proper_case.append(word.upper())
+            else:
+                proper_case.append(word.capitalize())
+                
+        return ' '.join(proper_case)
+        
+    def _extract_numeric(self, value):
+        """Extract numeric value from various formats."""
+        if not value:
+            return None
+            
+        if isinstance(value, (int, float)):
+            return value
+            
+        if isinstance(value, str):
+            # Try to extract numeric value from string using regex
+            matches = re.search(r'([\d,]+\.?\d*|\d*\.?\d+)', value)
+            if matches:
+                # Extract the matched part and remove commas
+                number_str = matches.group(1).replace(',', '')
+                try:
+                    return float(number_str)
+                except ValueError:
+                    pass
+                    
+        return None
+        
+    def _extract_currency(self, value):
+        """Extract currency code from value string."""
+        if not value:
+            return None
+            
+        # Common currency symbols and their codes
+        currency_map = {
+            '$': 'USD',
+            '€': 'EUR',
+            '£': 'GBP',
+            '¥': 'JPY',
+            '₹': 'INR',
+            'USD': 'USD',
+            'EUR': 'EUR',
+            'GBP': 'GBP',
+            'JPY': 'JPY',
+            'CHF': 'CHF',
+            'CAD': 'CAD',
+            'AUD': 'AUD',
+            'INR': 'INR',
+            'CNY': 'CNY',
+            'ZAR': 'ZAR'
+        }
+        
+        if isinstance(value, str):
+            # First check for currency codes or symbols at the start
+            for symbol, code in currency_map.items():
+                if value.strip().startswith(symbol):
+                    return code
+                    
+            # Look for currency names in the string
+            value_lower = value.lower()
+            for name, code in {
+                'dollar': 'USD',
+                'euro': 'EUR',
+                'pound': 'GBP',
+                'yen': 'JPY',
+                'rupee': 'INR',
+                'yuan': 'CNY',
+                'rand': 'ZAR',
+                'franc': 'CHF'
+            }.items():
+                if name in value_lower:
+                    return code
+                    
+        return None
+        
     def _normalize_tender(self, tender, source_name=None):
         """
         Normalize a tender from various formats into a standardized format.
@@ -1040,16 +1169,16 @@ class TenderTrailIntegration:
 
         # Extract key fields with helper method
         normalized_tender = {
-            "notice_id": self._extract_field(tender, ["id", "notice_id", "tender_id", "opportunity_id", "reference"]),
+            "notice_id": self._extract_field(tender, ["id", "notice_id", "tender_id", "opportunity_id", "reference", "solicitation_number"]),
             "notice_type": self._extract_field(tender, ["notice_type", "tender_type", "type", "opportunity_type"]),
             "notice_title": self._extract_field(tender, ["title", "notice_title", "tender_title", "opportunity_title", "project_notice"]),
             "description": self._extract_field(tender, ["description", "summary", "notice_description", "tender_description", "pdf_content"]),
             "date_published": self._format_date(self._extract_field(tender, ["publication_date", "published_on", "publish_date", "date_published", "date"])),
             "closing_date": self._format_date(self._extract_field(tender, ["deadline", "deadline_date", "closing_date", "deadline_on", "response_date", "pue_date"])),
-            "tender_value": self._extract_numeric(self._extract_field(tender, ["tender_value", "value", "contract_value", "amount"])),
-            "currency": self._extract_field(tender, ["currency", "tender_currency"]),
+            "tender_value": None,  # Will extract below
+            "currency": None,  # Will extract below
             "issuing_authority": self._extract_field(tender, ["issuing_authority", "authority", "organisation_name", "buyer", "agency_name"]),
-            "country": self._extract_field(tender, ["country", "beneficiary_countries", "member"]),
+            "country": None,  # Will extract below
             "location": self._extract_field(tender, ["location", "place_of_performance", "city"]),
             "source": tender.get("source", source_name),
             "categories": self._extract_field(tender, ["categories", "category", "sector", "classification_code"]),
@@ -1058,6 +1187,64 @@ class TenderTrailIntegration:
             "url": self._extract_field(tender, ["url", "notice_url", "tender_url", "contact_url"]),
             "bid_reference_no": self._extract_field(tender, ["bid_reference_no", "solicitation_number", "reference", "project_number"])
         }
+
+        # Extract country from different sources
+        country = self._extract_field(tender, ["country", "beneficiary_countries", "member"])
+        
+        # For sam.gov, try to extract from place_of_performance
+        if not country and source_name == "sam_gov" and isinstance(tender.get("place_of_performance"), dict):
+            place = tender.get("place_of_performance")
+            if isinstance(place.get("country"), dict) and place["country"].get("code"):
+                # Convert country code to name if possible
+                country_code = place["country"].get("code")
+                # In a real system, you'd use a country code lookup table here
+                # This is a simple example for common country codes
+                country_map = {
+                    "USA": "United States",
+                    "GBR": "United Kingdom",
+                    "CAN": "Canada", 
+                    "AUS": "Australia",
+                    "IND": "India",
+                    "CHN": "China",
+                    "JPN": "Japan",
+                    "DEU": "Germany",
+                    "FRA": "France",
+                    "ITA": "Italy",
+                    "MEX": "Mexico",
+                    "BRA": "Brazil",
+                    "ZAF": "South Africa",
+                    "RUS": "Russia",
+                    "KOR": "South Korea",
+                    "SGP": "Singapore",
+                    "AFG": "Afghanistan",
+                    "SLE": "Sierra Leone"
+                }
+                country = country_map.get(country_code, country_code)
+            elif isinstance(place.get("country"), str):
+                country = place.get("country")
+                
+        # Standardize country name format
+        if country:
+            normalized_tender["country"] = self._standardize_country(country)
+        
+        # Extract tender value and currency
+        # First check if there's a dedicated value field
+        value_field = self._extract_field(tender, ["tender_value", "value", "contract_value", "amount", "budget"])
+        currency_field = self._extract_field(tender, ["currency", "tender_currency"])
+        
+        # Extract numeric value
+        normalized_tender["tender_value"] = self._extract_numeric(value_field)
+        
+        # Extract currency
+        currency = None
+        if currency_field:
+            currency = currency_field
+        elif isinstance(value_field, str):
+            # Try to extract currency from the value string
+            currency = self._extract_currency(value_field)
+            
+        if currency:
+            normalized_tender["currency"] = currency
 
         # Ensure at least a default title exists
         if not normalized_tender["notice_title"]:
@@ -1187,46 +1374,6 @@ class TenderTrailIntegration:
                 return data[key]
                 
         return default
-        
-    def _clean_html(self, text):
-        """Clean HTML entities and formatting from text."""
-        if not text:
-            return ""
-            
-        # Convert to string if needed
-        text = str(text)
-        
-        # Replace common HTML entities
-        replacements = {
-            '&nbsp;': ' ',
-            '&amp;': '&',
-            '&lt;': '<',
-            '&gt;': '>',
-            '&quot;': '"',
-            '&apos;': "'",
-            '&ndash;': '-',
-            '&mdash;': '—',
-            '&rsquo;': "'",
-            '&lsquo;': "'",
-            '&ldquo;': '"',
-            '&rdquo;': '"',
-            '\n': ' ',
-            '\t': ' ',
-            '\r': ' ',
-            '\\n': ' ',
-            '\\t': ' ',
-            '\\r': ' ',
-            '\\u00a0': ' '
-        }
-        
-        for old, new in replacements.items():
-            text = text.replace(old, new)
-            
-        # Remove multiple spaces
-        while '  ' in text:
-            text = text.replace('  ', ' ')
-            
-        return text.strip()
         
     def _format_date(self, date_str):
         """Format a date string to ISO format."""
