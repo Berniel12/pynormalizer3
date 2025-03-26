@@ -54,16 +54,24 @@ class TenderTrailIntegration:
         1. process_source(tenders, source_name, create_tables=True) - Process a list of tenders
         2. process_source(source_name, batch_size=100, create_tables=True) - Load tenders from database
         """
+        # Add debug logging for input parameters
+        print(f"DEBUG: process_source called with:")
+        print(f"DEBUG: tenders_or_source type: {type(tenders_or_source)}")
+        print(f"DEBUG: tenders_or_source value: {tenders_or_source}")
+        print(f"DEBUG: source_name_or_batch_size: {source_name_or_batch_size}")
+        
         # Detect which call pattern is being used
         if isinstance(tenders_or_source, (list, tuple)) or (isinstance(tenders_or_source, str) and source_name_or_batch_size is not None):
             # First pattern: process_source(tenders, source_name)
             tenders = tenders_or_source
             source_name = source_name_or_batch_size
             batch_size = None
+            print(f"DEBUG: Using first pattern - direct tender processing")
         else:
             # Second pattern: process_source(source_name, batch_size)
             source_name = tenders_or_source
             batch_size = source_name_or_batch_size or 100
+            print(f"DEBUG: Using second pattern - fetching from database")
             
             # Skip processing if source_name is a single character
             if isinstance(source_name, str) and len(source_name.strip()) <= 1:
@@ -71,7 +79,11 @@ class TenderTrailIntegration:
                 return 0, 0
                 
             # Get tenders from database
+            print(f"DEBUG: Current source before _get_raw_tenders: {getattr(self, '_current_source', 'None')}")
             tenders = self._get_raw_tenders(source_name, batch_size)
+            print(f"DEBUG: Current source after _get_raw_tenders: {getattr(self, '_current_source', 'None')}")
+            print(f"DEBUG: Received tenders type: {type(tenders)}")
+            print(f"DEBUG: Number of tenders: {len(tenders) if isinstance(tenders, (list, tuple)) else 'not a list'}")
         
         print(f"Processing {len(tenders) if isinstance(tenders, (list, tuple)) else 'unknown number of'} tenders from source: {source_name}")
         
@@ -557,15 +569,20 @@ class TenderTrailIntegration:
     def _get_raw_tenders(self, source_name: str, batch_size: int) -> List[Dict[str, Any]]:
         """Get raw tenders from source table."""
         try:
+            print(f"DEBUG: _get_raw_tenders called with source_name: {source_name}, batch_size: {batch_size}")
+            print(f"DEBUG: Current source at start: {getattr(self, '_current_source', 'None')}")
+            
             # Store the source name for use in normalization
             self._current_source = source_name
+            print(f"DEBUG: Set current source to: {self._current_source}")
             
             # First, try the source_tenders table format
             table_name = f"{source_name}_tenders"
             try:
+                print(f"DEBUG: Attempting to query table: {table_name}")
                 response = self.supabase.table(table_name).select('*').limit(batch_size).execute()
                 if response and response.data:
-                    print(f"Found {len(response.data)} tenders in {table_name}")
+                    print(f"DEBUG: Found data in {table_name}. First item type: {type(response.data[0])}")
                     # Process tenders and ensure source name is preserved
                     processed = []
                     for tender in response.data:
@@ -606,24 +623,25 @@ class TenderTrailIntegration:
                     print(f"Processed {len(processed)} tenders from {table_name}")
                     return processed
             except Exception as e:
-                print(f"Table {table_name} not found, trying direct source table {source_name}")
+                print(f"DEBUG: Error querying {table_name}: {str(e)}")
             
             # Try direct source name as table
             try:
+                print(f"DEBUG: Attempting to query direct table: {source_name}")
                 # Print a sample of the first tender to diagnose issues
                 try:
                     sample_response = self.supabase.table(source_name).select('*').limit(1).execute()
                     if sample_response and sample_response.data:
-                        print(f"Sample tender from {source_name}: {json.dumps(sample_response.data[0])[:500]}...")
+                        print(f"DEBUG: Sample tender from {source_name}: {json.dumps(sample_response.data[0])[:500]}...")
                 except Exception as sample_e:
-                    print(f"Error getting sample tender: {sample_e}")
+                    print(f"DEBUG: Error getting sample tender: {sample_e}")
                 
                 # First try with processed field
                 try:
                     response = self.supabase.table(source_name).select('*').eq('processed', False).limit(batch_size).execute()
                     # Mark processed records
                     if response and response.data:
-                        print(f"Found {len(response.data)} unprocessed tenders in {source_name}")
+                        print(f"DEBUG: Found {len(response.data)} unprocessed tenders in {source_name}")
                         ids = []
                         processed = []
                         for item in response.data:
@@ -668,7 +686,7 @@ class TenderTrailIntegration:
                         
                         return processed
                 except Exception as e:
-                    print(f"Error querying with processed field, trying without: {e}")
+                    print(f"DEBUG: Error querying with processed field, trying without: {e}")
                     # Try without processed field
                     response = self.supabase.table(source_name).select('*').limit(batch_size).execute()
                     if response and response.data:
@@ -710,7 +728,7 @@ class TenderTrailIntegration:
                             processed.append(item)
                         return processed
             except Exception as e:
-                print(f"Error querying table {source_name}: {e}")
+                print(f"DEBUG: Error querying table {source_name}: {e}")
             
             # If we reach here, it means we couldn't find any valid tenders
             # Instead of processing source name characters, return empty list
