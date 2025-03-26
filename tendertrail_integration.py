@@ -60,18 +60,18 @@ class TenderTrailIntegration:
         print(f"DEBUG: tenders_or_source value: {tenders_or_source}")
         print(f"DEBUG: source_name_or_batch_size: {source_name_or_batch_size}")
         
-        # Detect which call pattern is being used
-        if isinstance(tenders_or_source, (list, tuple)) or (isinstance(tenders_or_source, str) and source_name_or_batch_size is not None):
-            # First pattern: process_source(tenders, source_name)
+        # Detect which call pattern is being used - FIXED LOGIC
+        if isinstance(tenders_or_source, (list, tuple)):
+            # First pattern with list/tuple: process_source(tenders, source_name)
             tenders = tenders_or_source
             source_name = source_name_or_batch_size
             batch_size = None
-            print(f"DEBUG: Using first pattern - direct tender processing")
-        else:
-            # Second pattern: process_source(source_name, batch_size)
+            print(f"DEBUG: Using first pattern - direct tender processing with list/tuple")
+        elif isinstance(source_name_or_batch_size, int):
+            # Second pattern with int batch_size: process_source(source_name, batch_size=100)
             source_name = tenders_or_source
-            batch_size = source_name_or_batch_size or 100
-            print(f"DEBUG: Using second pattern - fetching from database")
+            batch_size = source_name_or_batch_size
+            print(f"DEBUG: Using second pattern - fetching from database with batch_size={batch_size}")
             
             # Skip processing if source_name is a single character
             if isinstance(source_name, str) and len(source_name.strip()) <= 1:
@@ -84,7 +84,13 @@ class TenderTrailIntegration:
             print(f"DEBUG: Current source after _get_raw_tenders: {getattr(self, '_current_source', 'None')}")
             print(f"DEBUG: Received tenders type: {type(tenders)}")
             print(f"DEBUG: Number of tenders: {len(tenders) if isinstance(tenders, (list, tuple)) else 'not a list'}")
-        
+        else:
+            # First pattern with other data: process_source(tenders, source_name)
+            tenders = tenders_or_source
+            source_name = source_name_or_batch_size
+            batch_size = None
+            print(f"DEBUG: Using first pattern - direct tender processing with other data type")
+            
         print(f"Processing {len(tenders) if isinstance(tenders, (list, tuple)) else 'unknown number of'} tenders from source: {source_name}")
         
         try:
