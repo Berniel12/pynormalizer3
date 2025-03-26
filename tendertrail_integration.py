@@ -826,6 +826,44 @@ class TenderTrailIntegration:
         # Initialize Supabase client if needed
         if not self.supabase:
             self._init_supabase_client()
+        
+        # Only try to create the table once per session to avoid excessive warnings
+        if create_tables and not hasattr(self, '_table_creation_attempted'):
+            self._table_creation_attempted = True
+            try:
+                # Create table if needed
+                create_table_sql = """
+                CREATE TABLE IF NOT EXISTS unified_tenders (
+                    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                    title TEXT,
+                    description TEXT,
+                    date_published DATE,
+                    closing_date DATE,
+                    tender_value NUMERIC,
+                    tender_currency TEXT,
+                    location TEXT,
+                    country TEXT,
+                    issuing_authority TEXT,
+                    keywords TEXT[],
+                    tender_type TEXT,
+                    project_size TEXT,
+                    contact_information TEXT,
+                    source TEXT,
+                    raw_id TEXT,
+                    processed_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    metadata JSONB
+                );
+                CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+                """
+                # Try to execute SQL directly using RPC if available
+                result = self.supabase.rpc('exec_sql', {'query': create_table_sql}).execute()
+                if hasattr(result, 'error') and result.error:
+                    print(f"Notice: Table creation not supported via API. Will insert assuming table exists.")
+                else:
+                    print("Created unified_tenders table if it didn't exist")
+            except Exception as e:
+                print(f"Notice: Table operations not available via API. Will continue with existing table.")
             
         # Prepare records for insertion
         records = []
@@ -836,49 +874,8 @@ class TenderTrailIntegration:
                 
             # Convert metadata to JSON string if it's a dictionary
             if isinstance(tender.get('metadata'), dict):
-                # Move country from main object to metadata if it exists
-                if tender.get('country'):
-                    tender['metadata']['country'] = tender.get('country')
                 # Convert to JSON string
                 tender['metadata'] = json.dumps(tender['metadata'])
-            
-            # Check if the table exists and has the required metadata field
-            try:
-                if create_tables:
-                    # Create table if needed - only attempt once to avoid repeated errors
-                    create_table_sql = """
-                    CREATE TABLE IF NOT EXISTS unified_tenders (
-                        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                        title TEXT,
-                        description TEXT,
-                        date_published DATE,
-                        closing_date DATE,
-                        tender_value NUMERIC,
-                        tender_currency TEXT,
-                        location TEXT,
-                        issuing_authority TEXT,
-                        keywords TEXT[],
-                        tender_type TEXT,
-                        project_size TEXT,
-                        contact_information TEXT,
-                        source TEXT,
-                        raw_id TEXT,
-                        processed_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                        metadata JSONB
-                    );
-                    CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-                    """
-                    # Try to execute SQL directly using RPC if available
-                    result = self.supabase.rpc('exec_sql', {'query': create_table_sql}).execute()
-                    if hasattr(result, 'error') and result.error:
-                        print(f"Warning: Could not create table using exec_sql RPC: {result.error}")
-                        print("Will attempt to insert data assuming table exists")
-                    else:
-                        print("Created unified_tenders table if it didn't exist")
-            except Exception as e:
-                print(f"Warning: Could not create table: {str(e)}")
-                print("Will attempt to insert data assuming table exists")
             
             # Map normalized tender fields to database columns
             record = {
@@ -889,6 +886,7 @@ class TenderTrailIntegration:
                 'tender_value': tender.get('tender_value'),
                 'tender_currency': tender.get('currency'),
                 'location': tender.get('location'),
+                'country': tender.get('country', ''),  # Add country field directly
                 'issuing_authority': tender.get('issuing_authority'),
                 'tender_type': tender.get('notice_type'),
                 'contact_information': ', '.join(filter(None, [
@@ -1580,6 +1578,7 @@ class TenderTrailIntegration:
                 tender_value NUMERIC,
                 tender_currency TEXT,
                 location TEXT,
+                country TEXT, -- Added country field
                 issuing_authority TEXT,
                 keywords TEXT,
                 tender_type TEXT,
