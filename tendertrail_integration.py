@@ -5,37 +5,47 @@ from typing import Dict, Any, List, Optional
 from supabase import create_client, Client
 import uuid
 import traceback
-import datetime
 import re
-import os
 
 class TenderTrailIntegration:
     """Integration layer for TenderTrail normalization workflow."""
     
-    def __init__(self):
-        """Initialize the integration."""
-        # Set default attribute values
-        self.supabase = None
-        self.current_source = None
-        self.translation_available = False
-        self.translator = None
-        self.translation_cache = {}
-
-        # Try to import deep_translator for translation capability
+    def __init__(self, normalizer, preprocessor, supabase_url, supabase_key, skip_direct_connections=False):
+        """
+        Initialize the TenderTrail integration.
+        
+        Args:
+            normalizer: The normalizer instance to use
+            preprocessor: The preprocessor instance to use
+            supabase_url: URL of the Supabase project
+            supabase_key: API key for the Supabase project
+            skip_direct_connections: Whether to skip direct PostgreSQL connections (default: False)
+        """
         try:
-            import deep_translator
-            self.translation_available = True
-            print("Translation capability is available")
-        except ImportError:
-            print("Translation library not available. Install with: pip install deep-translator")
-
-        # Initialize Supabase client
-        try:
-            self.supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
-            print("Successfully initialized Supabase client")
+            self.normalizer = normalizer
+            self.preprocessor = preprocessor
+            self.supabase_url = supabase_url
+            self.supabase_key = supabase_key
+            self.skip_direct_connections = skip_direct_connections
+            
+            # Initialize Supabase client
+            try:
+                self.supabase: Client = create_client(supabase_url, supabase_key)
+                print("Successfully initialized Supabase client")
+            except Exception as e:
+                print(f"Error initializing Supabase client: {e}")
+                raise ValueError(f"Failed to initialize Supabase client: {e}")
+            
+            # Initialize translation cache
+            self.translation_cache = {}
+            
+            # Initialize schema cache
+            self.target_schema = None
+            
         except Exception as e:
-            print(f"Failed to initialize Supabase client: {e}")
+            print(f"Error in __init__: {e}")
             traceback.print_exc()
+            raise ValueError(f"Failed to initialize TenderTrailIntegration: {e}")
     
     def process_source(self, tenders_or_source, source_name_or_batch_size=None, create_tables=True):
         """
@@ -44,44 +54,22 @@ class TenderTrailIntegration:
         
         1. process_source(tenders, source_name, create_tables=True) - Process a list of tenders
         2. process_source(source_name, batch_size=100, create_tables=True) - Load tenders from database
-        """
-        # Add debug logging for input parameters
-        print(f"DEBUG: process_source called with:")
-        print(f"DEBUG: tenders_or_source type: {type(tenders_or_source)}")
-        print(f"DEBUG: tenders_or_source value: {tenders_or_source}")
-        print(f"DEBUG: source_name_or_batch_size: {source_name_or_batch_size}")
         
-        # Detect which call pattern is being used - FIXED LOGIC
-        if isinstance(tenders_or_source, (list, tuple)):
-            # First pattern with list/tuple: process_source(tenders, source_name)
+        The method automatically detects which pattern is being used based on the types of arguments.
+        """
+        # Detect which call pattern is being used
+        if isinstance(tenders_or_source, (list, tuple)) or (isinstance(tenders_or_source, str) and source_name_or_batch_size is not None):
+            # First pattern: process_source(tenders, source_name)
             tenders = tenders_or_source
             source_name = source_name_or_batch_size
             batch_size = None
-            print(f"DEBUG: Using first pattern - direct tender processing with list/tuple")
-        elif isinstance(source_name_or_batch_size, int):
-            # Second pattern with int batch_size: process_source(source_name, batch_size=100)
-            source_name = tenders_or_source
-            batch_size = source_name_or_batch_size
-            print(f"DEBUG: Using second pattern - fetching from database with batch_size={batch_size}")
-            
-            # Skip processing if source_name is a single character
-            if isinstance(source_name, str) and len(source_name.strip()) <= 1:
-                print(f"Skipping invalid source name: {source_name}")
-                return 0, 0
-                
-            # Get tenders from database
-            print(f"DEBUG: Current source before _get_raw_tenders: {getattr(self, '_current_source', 'None')}")
-            tenders = self._get_raw_tenders(source_name, batch_size)
-            print(f"DEBUG: Current source after _get_raw_tenders: {getattr(self, '_current_source', 'None')}")
-            print(f"DEBUG: Received tenders type: {type(tenders)}")
-            print(f"DEBUG: Number of tenders: {len(tenders) if isinstance(tenders, (list, tuple)) else 'not a list'}")
         else:
-            # First pattern with other data: process_source(tenders, source_name)
-            tenders = tenders_or_source
-            source_name = source_name_or_batch_size
-            batch_size = None
-            print(f"DEBUG: Using first pattern - direct tender processing with other data type")
-            
+            # Second pattern: process_source(source_name, batch_size)
+            source_name = tenders_or_source
+            batch_size = source_name_or_batch_size or 100
+            # Get tenders from database
+            tenders = self._get_raw_tenders(source_name, batch_size)
+        
         print(f"Processing {len(tenders) if isinstance(tenders, (list, tuple)) else 'unknown number of'} tenders from source: {source_name}")
         
         try:
@@ -93,82 +81,14 @@ class TenderTrailIntegration:
                 print(f"No tenders to process for source: {source_name}")
                 return 0, 0
             
-            # Skip if tenders is just a string (likely a source name character)
-            if isinstance(tenders, str) and len(tenders.strip()) <= 1:
-                print(f"Skipping invalid tender data: {tenders}")
-                return 0, 0
-            
             # Track statistics
             processed_count = 0
             error_count = 0
-            normalized_tenders = []
             
-            # Ensure tenders is a list
-            if not isinstance(tenders, (list, tuple)):
-                tenders = [tenders]
-            
-            # Process each tender
-            for tender in tenders:
-                try:
-                    # Skip single character strings
-                    if isinstance(tender, str) and len(tender.strip()) <= 1:
-                        print(f"Skipping single character tender: {tender}")
-                        continue
-                        
-                    # First attempt direct normalization (preferred for known source formats)
-                    normalized_tender = self._normalize_tender(tender, source_name)
-                    
-                    # If we got a valid normalized tender, use it
-                    if normalized_tender and isinstance(normalized_tender, dict) and normalized_tender.get("notice_title"):
-                        normalized_tenders.append(normalized_tender)
-                        processed_count += 1
-                        continue
-                    
-                    # If direct normalization failed, try the standard process with preprocessor and normalizer
-                    if self.preprocessor and self.normalizer:
-                        # Check if the preprocessor has the required method
-                        if hasattr(self.preprocessor, 'preprocess_tender') and callable(getattr(self.preprocessor, 'preprocess_tender')):
-                            # Preprocess the tender
-                            preprocessed_tender = self.preprocessor.preprocess_tender(tender)
-                            
-                            # Check if the normalizer has the required method
-                            if hasattr(self.normalizer, 'normalize_tender') and callable(getattr(self.normalizer, 'normalize_tender')):
-                                # Normalize the preprocessed tender
-                                normalized_tender = self.normalizer.normalize_tender(preprocessed_tender)
-                                
-                                # Add to the list of normalized tenders
-                                normalized_tenders.append(normalized_tender)
-                                processed_count += 1
-                                continue
-                            else:
-                                print(f"Warning: Normalizer doesn't have normalize_tender method")
-                        else:
-                            print(f"Warning: Preprocessor doesn't have preprocess_tender method")
-                    
-                    # If we reach here, create a minimal record
-                    print("Warning: Creating minimal record as normalization failed")
-                    minimal_tender = {
-                        "notice_id": str(uuid.uuid4()),
-                        "notice_type": "Default",
-                        "notice_title": f"Untitled Tender from {source_name}",
-                        "description": "Normalization failed, creating minimal record",
-                        "source": source_name,
-                        "country": "",
-                        "location": "",
-                        "issuing_authority": str(source_name),
-                        "date_published": None,
-                        "closing_date": None
-                    }
-                    normalized_tenders.append(minimal_tender)
-                    processed_count += 1
-                except Exception as e:
-                    error_message = f"Error processing tender from {source_name}: {e}"
-                    print(error_message)
-                    error_count += 1
-                    
-                    # Create error record
-                    self._insert_error(str(source_name), "processing_error", error_message, str(tender) if tender else "")
-            
+            # Use the enhanced processing pipeline
+            normalized_tenders = self._enhanced_process_raw_tenders(tenders, source_name)
+            processed_count = len(normalized_tenders)
+
             # Insert all normalized tenders into the database
             if normalized_tenders:
                 insert_count = self._insert_normalized_tenders(normalized_tenders, create_tables)
@@ -566,20 +486,15 @@ class TenderTrailIntegration:
     def _get_raw_tenders(self, source_name: str, batch_size: int) -> List[Dict[str, Any]]:
         """Get raw tenders from source table."""
         try:
-            print(f"DEBUG: _get_raw_tenders called with source_name: {source_name}, batch_size: {batch_size}")
-            print(f"DEBUG: Current source at start: {getattr(self, '_current_source', 'None')}")
-            
             # Store the source name for use in normalization
             self._current_source = source_name
-            print(f"DEBUG: Set current source to: {self._current_source}")
             
             # First, try the source_tenders table format
             table_name = f"{source_name}_tenders"
             try:
-                print(f"DEBUG: Attempting to query table: {table_name}")
                 response = self.supabase.table(table_name).select('*').limit(batch_size).execute()
                 if response and response.data:
-                    print(f"DEBUG: Found data in {table_name}. First item type: {type(response.data[0])}")
+                    print(f"Found {len(response.data)} tenders in {table_name}")
                     # Process tenders and ensure source name is preserved
                     processed = []
                     for tender in response.data:
@@ -591,11 +506,6 @@ class TenderTrailIntegration:
                                 tender['raw_data'] = json.dumps(tender)
                             processed.append(tender)
                         elif isinstance(tender, str):
-                            # Skip single character strings as they're likely not valid tenders
-                            if len(tender.strip()) <= 1:
-                                print(f"Skipping single character tender: {tender}")
-                                continue
-                                
                             try:
                                 parsed = json.loads(tender)
                                 if isinstance(parsed, dict):
@@ -620,33 +530,27 @@ class TenderTrailIntegration:
                     print(f"Processed {len(processed)} tenders from {table_name}")
                     return processed
             except Exception as e:
-                print(f"DEBUG: Error querying {table_name}: {str(e)}")
+                print(f"Table {table_name} not found, trying direct source table {source_name}")
             
             # Try direct source name as table
             try:
-                print(f"DEBUG: Attempting to query direct table: {source_name}")
                 # Print a sample of the first tender to diagnose issues
                 try:
                     sample_response = self.supabase.table(source_name).select('*').limit(1).execute()
                     if sample_response and sample_response.data:
-                        print(f"DEBUG: Sample tender from {source_name}: {json.dumps(sample_response.data[0])[:500]}...")
+                        print(f"Sample tender from {source_name}: {json.dumps(sample_response.data[0])[:500]}...")
                 except Exception as sample_e:
-                    print(f"DEBUG: Error getting sample tender: {sample_e}")
+                    print(f"Error getting sample tender: {sample_e}")
                 
                 # First try with processed field
                 try:
                     response = self.supabase.table(source_name).select('*').eq('processed', False).limit(batch_size).execute()
                     # Mark processed records
                     if response and response.data:
-                        print(f"DEBUG: Found {len(response.data)} unprocessed tenders in {source_name}")
+                        print(f"Found {len(response.data)} unprocessed tenders in {source_name}")
                         ids = []
                         processed = []
                         for item in response.data:
-                            # Skip single character strings
-                            if isinstance(item, str) and len(item.strip()) <= 1:
-                                print(f"Skipping single character tender: {item}")
-                                continue
-                                
                             if isinstance(item, dict):
                                 # Ensure source name is correct
                                 item['source'] = source_name
@@ -683,18 +587,13 @@ class TenderTrailIntegration:
                         
                         return processed
                 except Exception as e:
-                    print(f"DEBUG: Error querying with processed field, trying without: {e}")
+                    print(f"Error querying with processed field, trying without: {e}")
                     # Try without processed field
                     response = self.supabase.table(source_name).select('*').limit(batch_size).execute()
                     if response and response.data:
                         # Process tenders and ensure source name is preserved
                         processed = []
                         for item in response.data:
-                            # Skip single character strings
-                            if isinstance(item, str) and len(item.strip()) <= 1:
-                                print(f"Skipping single character tender: {item}")
-                                continue
-                                
                             if isinstance(item, dict):
                                 # Ensure source name is correct
                                 item['source'] = source_name
@@ -725,13 +624,10 @@ class TenderTrailIntegration:
                             processed.append(item)
                         return processed
             except Exception as e:
-                print(f"DEBUG: Error querying table {source_name}: {e}")
+                print(f"Error querying table {source_name}: {e}")
             
-            # If we reach here, it means we couldn't find any valid tenders
-            # Instead of processing source name characters, return empty list
-            print(f"No valid tenders found for source {source_name}")
+            # No valid data found
             return []
-            
         except Exception as e:
             print(f"Error getting raw tenders: {e}")
             return []
@@ -796,141 +692,254 @@ class TenderTrailIntegration:
         
         return processed_tenders
     
-    def _insert_normalized_tenders(self, normalized_tenders, create_tables=False):
-        """
-        Insert normalized tenders into the unified database.
-        
-        Args:
-            normalized_tenders (list): List of normalized tenders to insert
-            create_tables (bool): Whether to create tables if they don't exist
-        
-        Returns:
-            int: Number of inserted tenders
-        """
+    def _insert_normalized_tenders(self, normalized_tenders: List[Dict[str, Any]], create_tables=True) -> int:
+        """Insert normalized tenders into unified table and return count of successful insertions."""
         if not normalized_tenders:
+            print("No tenders to insert")
             return 0
+        
+        try:
+            print(f"Preparing to insert {len(normalized_tenders)} tenders")
             
-        print(f"Preparing to insert {len(normalized_tenders)} tenders")
-        batch_size = 10  # Insert in smaller batches to avoid timeouts
-        
-        # Initialize translator if needed
-        if self.translator is None and self.translation_available:
-            try:
-                from deep_translator import GoogleTranslator
-                self.translator = GoogleTranslator(source='auto', target='en')
-                print("Translation capability is available")
-            except ImportError:
-                self.translation_available = False
-                print("Translation capability not available")
-        
-        # Initialize Supabase client if needed
-        if not self.supabase:
-            self._init_supabase_client()
-        
-        # Only try to create the table once per session to avoid excessive warnings
-        if create_tables and not hasattr(self, '_table_creation_attempted'):
-            self._table_creation_attempted = True
-            try:
-                # Create table if needed
-                create_table_sql = """
-                CREATE TABLE IF NOT EXISTS unified_tenders (
-                    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                    title TEXT,
-                    description TEXT,
-                    date_published DATE,
-                    closing_date DATE,
-                    tender_value NUMERIC,
-                    tender_currency TEXT,
-                    location TEXT,
-                    country TEXT,
-                    issuing_authority TEXT,
-                    keywords TEXT[],
-                    tender_type TEXT,
-                    project_size TEXT,
-                    contact_information TEXT,
-                    source TEXT,
-                    raw_id TEXT,
-                    processed_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                    metadata JSONB
-                );
-                CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-                """
-                # Try to execute SQL directly using RPC if available
-                result = self.supabase.rpc('exec_sql', {'query': create_table_sql}).execute()
-                if hasattr(result, 'error') and result.error:
-                    print(f"Notice: Table creation not supported via API. Will insert assuming table exists.")
-                else:
-                    print("Created unified_tenders table if it didn't exist")
-            except Exception as e:
-                print(f"Notice: Table operations not available via API. Will continue with existing table.")
+            # Create a copy to avoid modifying the original
+            tenders_to_insert = []
+            inserted_count = 0
             
-        # Prepare records for insertion
-        records = []
-        
-        for tender in normalized_tenders:
-            if not tender:
-                continue
-                
-            # Convert metadata to JSON string if it's a dictionary
-            if isinstance(tender.get('metadata'), dict):
-                # Convert to JSON string
-                tender['metadata'] = json.dumps(tender['metadata'])
-            
-            # Map normalized tender fields to database columns
-            record = {
-                'title': tender.get('notice_title', '').strip(),
-                'description': tender.get('description', ''),
-                'date_published': tender.get('date_published'),
-                'closing_date': tender.get('closing_date'),
-                'tender_value': tender.get('tender_value'),
-                'tender_currency': tender.get('currency'),
-                'location': tender.get('location'),
-                'country': tender.get('country', ''),  # Add country field directly
-                'issuing_authority': tender.get('issuing_authority'),
-                'tender_type': tender.get('notice_type'),
-                'contact_information': ', '.join(filter(None, [
-                    tender.get('contact_email'),
-                    tender.get('contact_phone')
-                ])),
-                'source': tender.get('source'),
-                'raw_id': tender.get('notice_id'),
-                'metadata': tender.get('metadata'),
-                'keywords': []  # Initialize empty array for keywords
+            # Field mapping between normalized tender fields and database fields
+            field_mapping = {
+                "notice_title": "title",
+                "notice_type": "tender_type",
+                "issuing_authority": "issuing_authority",
+                "date_published": "date_published",
+                "closing_date": "closing_date",
+                "description": "description",
+                "location": "location",
+                "country": "location",  # Use country as fallback for location
+                "source": "source",
+                "value": "tender_value",
+                "currency": "tender_currency",
+                "email": "contact_information",
+                "cpvs": "keywords",  # Store CPVs as keywords
+                "url": "url",  # Add URL field if exists in db
+                "buyer": "buyer",  # Add buyer field if exists in db
+                "raw_id": "raw_id",
+                "notice_id": "raw_id"  # Use notice_id as fallback for raw_id
             }
             
-            # Try to translate description if it's not in English, but don't fail if it doesn't work
-            if self.translation_available and record['description'] and len(record['description']) > 0:
-                try:
-                    if self._detect_non_english(record['description']):
-                        original_desc = record['description']
-                        translated_desc = self._translate_text(original_desc)
-                        if translated_desc and translated_desc != original_desc:
-                            record['description'] = translated_desc
-                except Exception as e:
-                    print(f"Error during description translation: {str(e)[:100]}...")
-                    # Continue with original description if translation fails
-            
-            records.append(record)
-        
-        # Insert records in batches
-        inserted_count = 0
-        for i in range(0, len(records), batch_size):
-            batch = records[i:i+batch_size]
-            print(f"Inserting batch {i//batch_size + 1}/{len(records)//batch_size + (1 if len(records) % batch_size > 0 else 0)}")
-            
+            # Try to load deep-translator if available
+            translator = None
             try:
-                result = self.supabase.table('unified_tenders').insert(batch).execute()
-                if hasattr(result, 'error') and result.error:
-                    print(f"Error inserting batch: {result.error}")
-                else:
-                    inserted_count += len(batch)
-                    print(f"Successfully inserted batch with {len(batch)} tenders")
+                from deep_translator import GoogleTranslator
+                translator = GoogleTranslator(source='auto', target='en')
+                print("Translation capability is available")
+            except ImportError:
+                print("deep-translator not found, no translation will be performed")
+                print("Consider installing with: pip install deep-translator")
             except Exception as e:
-                print(f"Error inserting batch: {str(e)[:100]}...")
-        
-        print(f"Successfully inserted {inserted_count} out of {len(normalized_tenders)} tenders")
-        return inserted_count
+                print(f"Error initializing translator: {e}")
+            
+            # First check if metadata column exists in the table
+            metadata_column_exists = False
+            try:
+                # Try a simple query to check if metadata column exists
+                self.supabase.table('unified_tenders').select('metadata').limit(1).execute()
+                metadata_column_exists = True
+                print("Metadata column exists in unified_tenders table")
+            except Exception as e:
+                if "metadata" in str(e) and "does not exist" in str(e):
+                    print("Metadata column does not exist in unified_tenders table")
+                    print("Will skip metadata field in inserts")
+                else:
+                    print(f"Error checking metadata column: {e}")
+            
+            # Ensure all fields are properly formatted
+            for tender in normalized_tenders:
+                try:
+                    cleaned_tender = {}
+                    metadata = {}
+                    
+                    # Extract metadata if present
+                    if "metadata" in tender and tender["metadata"]:
+                        try:
+                            if isinstance(tender["metadata"], str):
+                                metadata = json.loads(tender["metadata"])
+                            elif isinstance(tender["metadata"], dict):
+                                metadata = tender["metadata"]
+                        except Exception as md_e:
+                            print(f"Error parsing metadata: {md_e}")
+                    
+                    # Map fields using the field mapping
+                    for norm_field, db_field in field_mapping.items():
+                        if norm_field in tender and tender[norm_field] is not None and tender[norm_field] != "":
+                            # For text fields, handle translation if needed
+                            if db_field in ["title", "description"] and translator and isinstance(tender[norm_field], str):
+                                # Check if translation is needed (non-English text)
+                                text = tender[norm_field]
+                                needs_translation = False
+                                
+                                # Check for non-ASCII characters that might indicate non-English text
+                                if any(ord(c) > 127 for c in text):
+                                    needs_translation = True
+                                
+                                # Common non-English indicators
+                                non_english_indicators = ['à', 'á', 'â', 'ã', 'ä', 'å', 'æ', 'ç', 'è', 'é', 'ê', 'ë', 
+                                                         'ì', 'í', 'î', 'ï', 'ñ', 'ò', 'ó', 'ô', 'õ', 'ö', 'ø', 'ù', 
+                                                         'ú', 'û', 'ü', 'ý', 'ÿ']
+                                
+                                if any(indicator in text.lower() for indicator in non_english_indicators):
+                                    needs_translation = True
+                                
+                                # Try to translate if needed
+                                if needs_translation:
+                                    try:
+                                        translated_text = translator.translate(text[:5000])  # Limit length for API
+                                        if translated_text and len(translated_text) > 10:  # Sanity check on result
+                                            # Store original in metadata
+                                            metadata[f"original_{norm_field}"] = text
+                                            # Use translated text
+                                            cleaned_tender[db_field] = translated_text[:2000]  # Truncate if needed
+                                            continue
+                                    except Exception as trans_e:
+                                        print(f"Translation error: {trans_e}")
+                            
+                            # Special handling for date fields
+                            if db_field in ["date_published", "closing_date"]:
+                                # Parse date if it's a string
+                                if isinstance(tender[norm_field], str):
+                                    parsed_date = self._parse_date(tender[norm_field])
+                                    if parsed_date:
+                                        # Sanity check on year - if after 2030 or before 2000, probably incorrect
+                                        try:
+                                            year = int(parsed_date.split('-')[0])
+                                            if year > 2030:
+                                                # Adjust year to current year
+                                                import datetime
+                                                current_year = datetime.datetime.now().year
+                                                parts = parsed_date.split('-')
+                                                parsed_date = f"{current_year}-{parts[1]}-{parts[2]}"
+                                        except:
+                                            pass
+                                        
+                                        cleaned_tender[db_field] = parsed_date
+                                    else:
+                                        cleaned_tender[db_field] = None
+                                else:
+                                    cleaned_tender[db_field] = tender[norm_field]
+                                
+                            # Special handling for value field
+                            elif db_field == "tender_value" and tender[norm_field] is not None:
+                                try:
+                                    # Try to convert to float
+                                    if isinstance(tender[norm_field], (int, float)):
+                                        cleaned_tender[db_field] = str(tender[norm_field])
+                                    elif isinstance(tender[norm_field], str):
+                                        # Remove any non-numeric characters except decimal point
+                                        import re
+                                        numeric_str = re.sub(r'[^\d.]', '', tender[norm_field])
+                                        if numeric_str:
+                                            cleaned_tender[db_field] = str(float(numeric_str))
+                                except Exception as val_e:
+                                    print(f"Error parsing value: {val_e}")
+                                    
+                            # Special handling for CPV codes
+                            elif norm_field == "cpvs" and db_field == "keywords":
+                                if isinstance(tender[norm_field], list):
+                                    cleaned_tender[db_field] = ",".join([str(cpv) for cpv in tender[norm_field]])
+                                elif isinstance(tender[norm_field], str):
+                                    cleaned_tender[db_field] = tender[norm_field]
+                                    
+                            # For other text fields, just truncate if needed
+                            elif isinstance(tender[norm_field], str):
+                                cleaned_tender[db_field] = tender[norm_field][:2000]  # Truncate long values
+                            elif isinstance(tender[norm_field], (dict, list)):
+                                # Convert complex objects to JSON string
+                                cleaned_tender[db_field] = json.dumps(tender[norm_field])[:2000]
+                            else:
+                                cleaned_tender[db_field] = str(tender[norm_field])[:2000]
+                    
+                    # Ensure required fields exist with defaults
+                    if "title" not in cleaned_tender or not cleaned_tender["title"]:
+                        cleaned_tender["title"] = f"Untitled Tender from {tender.get('source', 'Unknown')}"
+                        
+                    if "source" not in cleaned_tender or not cleaned_tender["source"]:
+                        cleaned_tender["source"] = "Unknown"
+                        
+                    if "description" not in cleaned_tender or not cleaned_tender["description"]:
+                        # Try to create a description from other fields
+                        description_parts = []
+                        for field in ["notice_type", "location", "country", "issuing_authority"]:
+                            if field in tender and tender[field]:
+                                description_parts.append(f"{field.replace('_', ' ').title()}: {tender[field]}")
+                        
+                        if description_parts:
+                            cleaned_tender["description"] = " | ".join(description_parts)
+                        else:
+                            cleaned_tender["description"] = "No detailed content available"
+                    
+                    # Add processed_at if not present
+                    if "processed_at" not in cleaned_tender:
+                        cleaned_tender["processed_at"] = self._get_current_timestamp()
+                    
+                    # Add metadata column if it exists in the database and we have metadata
+                    if metadata_column_exists and metadata:
+                        cleaned_tender["metadata"] = json.dumps(metadata)
+                    
+                    tenders_to_insert.append(cleaned_tender)
+                except Exception as tender_e:
+                    print(f"Error preparing tender for insertion: {tender_e}")
+                    continue
+            
+            # Insert in batches to avoid timeout issues
+            batch_size = 10  # Smaller batch size for better error handling
+            for i in range(0, len(tenders_to_insert), batch_size):
+                batch = tenders_to_insert[i:i + batch_size]
+                try:
+                    print(f"Inserting batch {i//batch_size + 1}/{(len(tenders_to_insert) + batch_size - 1)//batch_size}")
+                    response = self.supabase.table('unified_tenders').insert(batch).execute()
+                    if hasattr(response, 'data'):
+                        print(f"Successfully inserted batch with {len(batch)} tenders")
+                        inserted_count += len(batch)
+                    else:
+                        print(f"Batch insert completed but no data returned")
+                        inserted_count += len(batch)  # Assume success
+                except Exception as batch_error:
+                    print(f"Error inserting batch: {batch_error}")
+                    
+                    # Check for common errors
+                    error_str = str(batch_error)
+                    if "timeout" in error_str.lower():
+                        print("Connection timeout error - consider using smaller batch sizes")
+                    elif "duplicate key" in error_str.lower():
+                        print("Duplicate tender entries detected - some tenders already exist in the database")
+                    
+                    # Try to insert one by one with even smaller batches
+                    print(f"Attempting one-by-one insertion for batch {i//batch_size + 1}")
+                    for j in range(0, len(batch), 3):  # Try with micro-batches of 3
+                        micro_batch = batch[j:j+3]
+                        try:
+                            response = self.supabase.table('unified_tenders').insert(micro_batch).execute()
+                            if hasattr(response, 'data'):
+                                inserted_count += len(micro_batch)
+                                print(f"Inserted micro-batch of {len(micro_batch)} tenders")
+                        except Exception as micro_error:
+                            # Final fallback - truly one by one
+                            for tender in micro_batch:
+                                try:
+                                    response = self.supabase.table('unified_tenders').insert(tender).execute()
+                                    if hasattr(response, 'data'):
+                                        inserted_count += 1
+                                        print(f"Inserted single tender")
+                                except Exception as single_error:
+                                    print(f"Error inserting single tender: {single_error}")
+            
+            print(f"Successfully inserted {inserted_count} out of {len(normalized_tenders)} tenders")
+            return inserted_count
+        except Exception as e:
+            print(f"Error inserting normalized tenders: {e}")
+            if "timeout" in str(e).lower():
+                print("Connection timeout - network conditions may be affecting database access")
+            print("Data sample that failed:", normalized_tenders[0] if normalized_tenders else "No data")
+            return 0
     
     def _get_default_target_schema(self) -> Dict[str, Any]:
         """Get default target schema."""
@@ -1012,715 +1021,288 @@ class TenderTrailIntegration:
             "language": "en"
         }
 
-    def _clean_html(self, html_content):
-        """Remove HTML tags and convert entities to get clean text."""
-        if not html_content:
-            return ""
-            
-        # Check if it's already plain text (no HTML)
-        if '<' not in html_content and '&' not in html_content:
-            return html_content.strip()
-            
-        # Replace common HTML entities
-        entities = {
-            '&nbsp;': ' ', '&amp;': '&', '&lt;': '<', '&gt;': '>', 
-            '&quot;': '"', '&#39;': "'", '&apos;': "'", '&ndash;': '-', 
-            '&mdash;': '—', '&rsquo;': "'", '&lsquo;': "'", '&ldquo;': '"', 
-            '&rdquo;': '"', '&#160;': ' ', '&#8211;': '-', '&#8212;': '—',
-            '&#8216;': "'", '&#8217;': "'", '&#8220;': '"', '&#8221;': '"',
-            '&shy;': '', '&bull;': '•', '&middot;': '·', '&hellip;': '...',
-            '&copy;': '©', '&reg;': '®', '&trade;': '™', '&euro;': '€',
-            '&pound;': '£', '&yen;': '¥', '&cent;': '¢', '&sect;': '§',
-            '&deg;': '°', '&plusmn;': '±', '&sup2;': '²', '&sup3;': '³',
-            '&micro;': 'µ', '&para;': '¶', '&aacute;': 'á', '&eacute;': 'é',
-            '&iacute;': 'í', '&oacute;': 'ó', '&uacute;': 'ú', '&ntilde;': 'ñ'
-        }
-        
-        for entity, replacement in entities.items():
-            html_content = html_content.replace(entity, replacement)
-            
-        # Also handle numeric entities
-        html_content = re.sub(r'&#(\d+);', lambda m: chr(int(m.group(1))), html_content)
-        
-        # Replace block elements with newlines
-        html_content = re.sub(r'</(p|div|h\d|table|tr|ul|ol|li|blockquote)>', '\n', html_content, flags=re.IGNORECASE)
-        
-        # Replace break tags with newlines
-        html_content = re.sub(r'<br\s*/?>|<hr\s*/?>|<br>', '\n', html_content, flags=re.IGNORECASE)
-        
-        # Remove all remaining HTML tags
-        html_content = re.sub(r'<[^>]*>', '', html_content)
-        
-        # Fix whitespace issues
-        html_content = re.sub(r' +', ' ', html_content)        # Multiple spaces to single space
-        html_content = re.sub(r'(\n\s*)+', '\n\n', html_content)  # Multiple newlines to double newline
-        html_content = re.sub(r'^\s+', '', html_content)       # Remove leading whitespace
-        html_content = re.sub(r'\s+$', '', html_content)       # Remove trailing whitespace
-        
-        # Decode URL-encoded characters
-        html_content = html_content.replace('%20', ' ')
-        html_content = html_content.replace('%27', "'")
-        html_content = html_content.replace('%22', '"')
-        html_content = html_content.replace('%2C', ',')
-        html_content = html_content.replace('%2F', '/')
-        html_content = html_content.replace('%3A', ':')
-        html_content = html_content.replace('%3B', ';')
-        html_content = html_content.replace('%3D', '=')
-        html_content = html_content.replace('%3F', '?')
-        html_content = html_content.replace('%40', '@')
-        
-        return html_content.strip()
-        
-    def _standardize_country(self, country):
-        """Standardize country names to proper case format."""
-        if not country:
-            return ""
-            
-        # Handle empty strings
-        country = country.strip()
-        if not country:
-            return ""
-            
-        # Already proper case, return as is
-        if not country.isupper() and not country.islower():
-            return country
-            
-        # Uppercase country codes that should remain uppercase
-        if len(country) <= 3 and country.isupper():
-            return country
-            
-        # Convert to proper case
-        words = country.split()
-        proper_case = []
-        
-        for word in words:
-            # Common country prefixes remain lowercase after first word
-            if word.lower() in ['of', 'the', 'and', 'de', 'del', 'da', 'dos'] and proper_case:
-                proper_case.append(word.lower())
-            # Special case for USA, UK, UAE, etc.
-            elif word.upper() in ['USA', 'UK', 'UAE', 'EU', 'DRC']:
-                proper_case.append(word.upper())
-            else:
-                proper_case.append(word.capitalize())
-                
-        return ' '.join(proper_case)
-        
-    def _extract_numeric(self, value):
-        """Extract numeric value from various formats."""
-        if not value:
-            return None
-            
-        if isinstance(value, (int, float)):
-            return value
-            
-        if isinstance(value, str):
-            # Remove currency symbols and other non-numeric characters
-            cleaned = value.strip()
-            
-            # Remove known currency symbols
-            for symbol in ['$', '€', '£', '¥', '₹', 'USD', 'EUR', 'GBP', 'JPY', 'CHF', 'CAD', 'AUD', 'INR', 'CNY', 'ZAR']:
-                cleaned = cleaned.replace(symbol, '')
-            
-            # Try to extract numeric value using different patterns
-            # Pattern 1: Simple numbers (123,456.78)
-            matches = re.search(r'([\d,]+\.?\d*|\d*\.?\d+)', cleaned)
-            if matches:
-                # Extract the matched part and remove commas
-                number_str = matches.group(1).replace(',', '')
-                try:
-                    return float(number_str)
-                except ValueError:
-                    pass
-                    
-            # Pattern 2: Look for values with million/billion indicators
-            matches = re.search(r'(\d+\.?\d*)\s*(million|m|billion|b)', cleaned.lower())
-            if matches:
-                num = float(matches.group(1))
-                multiplier = matches.group(2)
-                if multiplier in ['million', 'm']:
-                    return num * 1000000
-                elif multiplier in ['billion', 'b']:
-                    return num * 1000000000
-                    
-            # Pattern 3: Look for ranges and take the higher value
-            matches = re.search(r'(\d+\.?\d*)[^\d]+(\d+\.?\d*)', cleaned)
-            if matches:
-                try:
-                    val1 = float(matches.group(1))
-                    val2 = float(matches.group(2))
-                    return max(val1, val2)
-                except ValueError:
-                    pass
-                    
-        # Check if description has financial info
-        if hasattr(self, 'current_tender') and isinstance(self.current_tender, dict):
-            desc = self.current_tender.get('description', '')
-            if isinstance(desc, str) and desc:
-                # Look for patterns like "$X million" or "X million dollars"
-                money_patterns = [
-                    r'\$\s*(\d+\.?\d*)\s*(million|m|billion|b)',
-                    r'(\d+\.?\d*)\s*(million|m|billion|b)\s*(dollars|usd|euro|eur|pound|gbp)',
-                    r'budget of\s*[\$\€\£]?\s*(\d+\.?\d*)\s*(million|m|billion|b)?',
-                    r'estimated (?:cost|value|amount|price).{1,20}[\$\€\£]?\s*(\d+\.?\d*)\s*(million|m|billion|b)?',
-                    r'contract value.{1,20}[\$\€\£]?\s*(\d+\.?\d*)\s*(million|m|billion|b)?'
-                ]
-                
-                for pattern in money_patterns:
-                    matches = re.search(pattern, desc.lower())
-                    if matches:
-                        num = float(matches.group(1))
-                        try:
-                            if matches.group(2) and matches.group(2) in ['million', 'm']:
-                                num *= 1000000
-                            elif matches.group(2) and matches.group(2) in ['billion', 'b']:
-                                num *= 1000000000
-                        except IndexError:
-                            pass
-                        return num
-                        
-        return None
-        
-    def _extract_currency(self, value):
-        """Extract currency code from value string."""
-        if not value:
-            return None
-            
-        # Common currency symbols and their codes
-        currency_map = {
-            '$': 'USD',
-            'US$': 'USD', 
-            'USD': 'USD',
-            '€': 'EUR',
-            'EUR': 'EUR',
-            '£': 'GBP',
-            'GBP': 'GBP',
-            '¥': 'JPY',
-            'JPY': 'JPY',
-            '₹': 'INR',
-            'INR': 'INR',
-            'CHF': 'CHF',
-            'CAD': 'CAD',
-            'AUD': 'AUD',
-            'CNY': 'CNY',
-            'ZAR': 'ZAR'
-        }
-        
-        if isinstance(value, str):
-            value = value.strip()
-            
-            # First check for currency codes or symbols at the start
-            for symbol, code in currency_map.items():
-                if value.startswith(symbol):
-                    return code
-                    
-            # Look for currency names in the string
-            value_lower = value.lower()
-            for name, code in {
-                'dollar': 'USD',
-                'usd': 'USD',
-                'us dollar': 'USD',
-                'euro': 'EUR',
-                'eur': 'EUR',
-                'pound': 'GBP',
-                'gbp': 'GBP',
-                'yen': 'JPY',
-                'jpy': 'JPY',
-                'rupee': 'INR',
-                'inr': 'INR',
-                'yuan': 'CNY',
-                'cny': 'CNY',
-                'rand': 'ZAR',
-                'zar': 'ZAR',
-                'franc': 'CHF',
-                'chf': 'CHF'
-            }.items():
-                if name in value_lower:
-                    return code
-                    
-        # Check description for currency mentions
-        if hasattr(self, 'current_tender') and isinstance(self.current_tender, dict):
-            desc = self.current_tender.get('description', '')
-            if isinstance(desc, str) and desc:
-                desc_lower = desc.lower()
-                
-                # Look for currency symbols at position 0 or close to numbers
-                for symbol, code in currency_map.items():
-                    if symbol in desc:
-                        return code
-                        
-                # Look for currency names in context of amounts
-                for name, code in {
-                    'dollar': 'USD',
-                    'usd': 'USD',
-                    'euro': 'EUR',
-                    'eur': 'EUR',
-                    'pound sterling': 'GBP',
-                    'pound': 'GBP', 
-                    'gbp': 'GBP'
-                }.items():
-                    if name in desc_lower and re.search(r'\d+\s*' + name, desc_lower):
-                        return code
-                        
-            # If description has budget keywords, default to USD for US agencies
-            if self.current_tender.get('source') in ['sam_gov', 'usaid'] and re.search(r'budget|amount|cost|value', desc_lower):
-                return 'USD'
-                
-        # Default currency based on source country
-        country_currency = {
-            'United States': 'USD',
-            'USA': 'USD',
-            'EU': 'EUR',
-            'United Kingdom': 'GBP',
-            'UK': 'GBP', 
-            'Japan': 'JPY',
-            'India': 'INR',
-            'Switzerland': 'CHF',
-            'Canada': 'CAD',
-            'Australia': 'AUD',
-            'China': 'CNY',
-            'South Africa': 'ZAR'
-        }
-        
-        if hasattr(self, 'current_tender') and isinstance(self.current_tender, dict):
-            country = self.current_tender.get('country')
-            if country in country_currency:
-                return country_currency[country]
-                
-        return None
-
-    def _extract_categories(self, text, source_name=None):
-        """Extract standardized categories from text."""
-        if not text:
-            return []
-            
-        # Common procurement categories by domain
-        category_keywords = {
-            "construction": ["construction", "building", "infrastructure", "renovation", "civil works", 
-                            "roads", "bridges", "facilities", "maintenance", "repair"],
-            "it_services": ["it", "software", "hardware", "computer", "digital", "technology", "ict", 
-                          "information technology", "system", "network", "programming", "website", 
-                          "application", "database", "cloud", "security", "data", "automation"],
-            "consulting": ["consulting", "consultancy", "advisory", "technical assistance", 
-                         "expert", "specialist", "professional services", "expertise"],
-            "healthcare": ["health", "medical", "hospital", "clinic", "pharmaceutical", "medicine", 
-                         "doctor", "nurse", "healthcare", "patient", "treatment", "diagnostic"],
-            "education": ["education", "training", "teaching", "school", "university", "academic", 
-                        "learning", "educational", "curriculum", "e-learning", "capacity building"],
-            "financial": ["financial", "banking", "insurance", "accounting", "audit", "finance", 
-                        "investment", "economic", "fiscal", "monetary", "budget"],
-            "agriculture": ["agriculture", "farming", "crops", "livestock", "irrigation", "rural", 
-                          "agricultural", "food security", "agribusiness", "agro"],
-            "energy": ["energy", "electricity", "power", "renewable", "solar", "wind", "hydro", 
-                     "gas", "oil", "electrical", "utility", "utilities"],
-            "environment": ["environment", "environmental", "sustainability", "sustainable", 
-                          "climate", "green", "conservation", "water", "sanitation", "waste"],
-            "transportation": ["transport", "transportation", "logistics", "road", "railway", 
-                             "aviation", "maritime", "vehicle", "fleet", "shipping", "freight"],
-            "security": ["security", "defense", "military", "police", "surveillance", 
-                       "protection", "safety", "emergency", "disaster"],
-            "telecommunications": ["telecom", "telecommunications", "communication", "mobile", 
-                                 "broadband", "internet", "wireless", "fiber", "satellite"]
-        }
-        
-        text_lower = text.lower()
-        found_categories = []
-        
-        # Check for keywords in text
-        for category, keywords in category_keywords.items():
-            for keyword in keywords:
-                if keyword in text_lower:
-                    found_categories.append(category)
-                    break
-                    
-        # Source-specific categories
-        if source_name == "ted_eu" and "services" in text_lower:
-            found_categories.append("services")
-            
-        if source_name == "sam_gov" and "supplies" in text_lower:
-            found_categories.append("supplies")
-            
-        # If no categories found, use "other"
-        if not found_categories:
-            return ["other"]
-            
-        # Remove duplicates and sort
-        return sorted(list(set(found_categories)))
-        
-    def _extract_deadline_date(self, tender, default_days=30):
-        """Extract closing/deadline date with fallbacks."""
-        # Try direct field extraction first
-        date_fields = [
-            "closing_date", "deadline", "deadline_date", "response_date", 
-            "pue_date", "end_date", "expiry_date", "due_date"
-        ]
-        
-        for field in date_fields:
-            if tender.get(field):
-                formatted = self._format_date(tender.get(field))
-                if formatted:
-                    return formatted
-        
-        # Try to find deadline in the description
-        if isinstance(tender.get("description"), str):
-            desc = tender.get("description").lower()
-            
-            # Look for specific date patterns
-            # Format: DD Month YYYY
-            date_match = re.search(r'(deadline|due|closing|submission).{1,30}?(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(\d{4})', desc)
-            if date_match:
-                day = int(date_match.group(2))
-                month_str = date_match.group(3)
-                year = int(date_match.group(4))
-                
-                month_map = {
-                    'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
-                    'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
-                }
-                
-                month = month_map.get(month_str[:3].lower())
-                if month:
-                    try:
-                        import datetime
-                        closing_date = datetime.date(year, month, day)
-                        return closing_date.strftime('%Y-%m-%d')
-                    except ValueError:
-                        pass
-        
-        # If publication date exists, default to publication date + default_days
-        pub_date = tender.get("publication_date") or tender.get("publish_date") or tender.get("date_published") or tender.get("date")
-        if pub_date:
-            formatted_pub_date = self._format_date(pub_date)
-            if formatted_pub_date:
-                try:
-                    import datetime
-                    from dateutil import parser
-                    
-                    pub_date_obj = parser.parse(formatted_pub_date)
-                    closing_date = pub_date_obj + datetime.timedelta(days=default_days)
-                    return closing_date.strftime('%Y-%m-%d')
-                except (ValueError, ImportError):
-                    pass
-        
-        return None
-        
     def _normalize_tender(self, tender, source_name=None):
-        """
-        Normalize a tender from various formats into a standardized format.
-        This handles both dictionary and string inputs, extracts key fields,
-        and returns a cleaned structure.
-        """
+        """Normalize a tender to the target schema."""
         if not tender:
-            print("Warning: Empty tender received")
-            return None
-
-        # Convert tender to dictionary if it's a string
-        if isinstance(tender, str):
-            try:
-                tender = json.loads(tender)
-            except json.JSONDecodeError:
-                print(f"Warning: Could not parse tender string: {tender[:100]}...")
-                return None
-
-        if not isinstance(tender, dict):
-            print(f"Warning: Unsupported tender type: {type(tender)}")
-            return None
-
-        # Store reference to the current tender for value extraction
-        self.current_tender = tender
-            
-        # Set source if provided
-        if source_name and not tender.get("source"):
-            tender["source"] = source_name
-
-        # Extract key fields with helper method
-        normalized_tender = {
-            "notice_id": self._extract_field(tender, ["id", "notice_id", "tender_id", "opportunity_id", "reference", "solicitation_number"]),
-            "notice_type": self._extract_field(tender, ["notice_type", "tender_type", "type", "opportunity_type"]),
-            "notice_title": self._extract_field(tender, ["title", "notice_title", "tender_title", "opportunity_title", "project_notice"]),
-            "description": self._extract_field(tender, ["description", "summary", "notice_description", "tender_description", "pdf_content"]),
-            "date_published": self._format_date(self._extract_field(tender, ["publication_date", "published_on", "publish_date", "date_published", "date"])),
-            "closing_date": self._format_date(self._extract_field(tender, ["deadline", "deadline_date", "closing_date", "deadline_on", "response_date", "pue_date"])),
-            "tender_value": None,  # Will extract below
-            "currency": None,  # Will extract below
-            "issuing_authority": self._extract_field(tender, ["issuing_authority", "authority", "organisation_name", "buyer", "agency_name"]),
-            "country": None,  # Will extract below
-            "location": self._extract_field(tender, ["location", "place_of_performance", "city"]),
-            "source": tender.get("source", source_name),
-            "categories": self._extract_field(tender, ["categories", "category", "sector", "classification_code"]),
-            "contact_email": self._extract_field(tender, ["contact_email", "email"]),
-            "contact_phone": self._extract_field(tender, ["contact_phone", "phone"]),
-            "url": self._extract_field(tender, ["url", "notice_url", "tender_url", "contact_url"]),
-            "bid_reference_no": self._extract_field(tender, ["bid_reference_no", "solicitation_number", "reference", "project_number"])
-        }
-
-        # Extract country from different sources
-        country = self._extract_field(tender, ["country", "beneficiary_countries", "member"])
-        
-        # For sam.gov, try to extract from place_of_performance
-        if not country and source_name == "sam_gov" and isinstance(tender.get("place_of_performance"), dict):
-            place = tender.get("place_of_performance")
-            if isinstance(place.get("country"), dict) and place["country"].get("code"):
-                # Convert country code to name if possible
-                country_code = place["country"].get("code")
-                # In a real system, you'd use a country code lookup table here
-                # This is a simple example for common country codes
-                country_map = {
-                    "USA": "United States",
-                    "GBR": "United Kingdom",
-                    "CAN": "Canada", 
-                    "AUS": "Australia",
-                    "IND": "India",
-                    "CHN": "China",
-                    "JPN": "Japan",
-                    "DEU": "Germany",
-                    "FRA": "France",
-                    "ITA": "Italy",
-                    "MEX": "Mexico",
-                    "BRA": "Brazil",
-                    "ZAF": "South Africa",
-                    "RUS": "Russia",
-                    "KOR": "South Korea",
-                    "SGP": "Singapore",
-                    "AFG": "Afghanistan",
-                    "SLE": "Sierra Leone",
-                    "PAK": "Pakistan",
-                    "SDN": "Sudan",
-                    "TZA": "Tanzania"
-                }
-                country = country_map.get(country_code, country_code)
-            elif isinstance(place.get("country"), str):
-                country = place.get("country")
-                
-        # Standardize country name format
-        if country:
-            normalized_tender["country"] = self._standardize_country(country)
-        
-        # Extract tender value and currency
-        # First check if there's a dedicated value field
-        value_field = self._extract_field(tender, ["tender_value", "value", "contract_value", "amount", "budget"])
-        currency_field = self._extract_field(tender, ["currency", "tender_currency"])
-        
-        # Extract numeric value
-        normalized_tender["tender_value"] = self._extract_numeric(value_field)
-        
-        # Extract currency
-        currency = None
-        if currency_field:
-            currency = currency_field
-        elif isinstance(value_field, str):
-            # Try to extract currency from the value string
-            currency = self._extract_currency(value_field)
-            
-        if currency:
-            normalized_tender["currency"] = currency
-
-        # Ensure at least a default title exists
-        if not normalized_tender["notice_title"]:
-            normalized_tender["notice_title"] = f"Untitled Tender from {source_name}"
-        
-        # Clean description if it contains HTML
-        description = normalized_tender["description"]
-        if description:
-            normalized_tender["description"] = self._clean_html(description)
-
-        # Extract contact information from description if not already present
-        if not normalized_tender["contact_email"] and normalized_tender["description"]:
-            # Look for email addresses
-            email_match = re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', normalized_tender["description"])
-            if email_match:
-                normalized_tender["contact_email"] = email_match.group(0)
-                
-        # Extract phone numbers if not already present
-        if not normalized_tender["contact_phone"] and normalized_tender["description"]:
-            # Common phone number patterns
-            phone_match = re.search(r'(?:\+\d{1,3}[-\s]?)?\(?\d{3}\)?[-\s]?\d{3}[-\s]?\d{4}', normalized_tender["description"])
-            if phone_match:
-                normalized_tender["contact_phone"] = phone_match.group(0)
-                
-        # Extract categories from title and description
-        if not normalized_tender["categories"]:
-            combined_text = (normalized_tender["notice_title"] or "") + " " + (normalized_tender["description"] or "")
-            categories = self._extract_categories(combined_text, source_name)
-            if categories:
-                normalized_tender["categories"] = categories
-                
-        # Try to extract or infer deadline if not set
-        if not normalized_tender["closing_date"]:
-            normalized_tender["closing_date"] = self._extract_deadline_date(tender)
-
-        # Store the raw data for reference
-        normalized_tender["metadata"] = {
-            "raw_data": json.dumps(tender),
-            "id": self._extract_field(tender, ["id"]),
-            "project_name": self._extract_field(tender, ["project_name"]),
-            "project_id": self._extract_field(tender, ["project_id", "project_number"]),
-            "procurement_method": self._extract_field(tender, ["procurement_method", "procedure_type"]),
-            "processed": tender.get("processed", False)
-        }
-
-        # Initialize translation if needed
-        if self.translator is None and self.translation_available:
-            try:
-                from deep_translator import GoogleTranslator
-                self.translator = GoogleTranslator(source='auto', target='en')
-                self.translation_cache = {}
-            except ImportError:
-                self.translation_available = False
-                print("Translation capability not available")
-
-        # Translate title if it contains non-English content
-        if normalized_tender["notice_title"]:
-            original_title = normalized_tender["notice_title"]
-            translated_title = self._translate_text(original_title)
-            if translated_title != original_title:
-                normalized_tender["metadata"]["original_title"] = original_title
-                normalized_tender["notice_title"] = translated_title
-                print(f"Translated title from: '{original_title[:30]}...' to '{translated_title[:30]}...'")
-
-        # Translate description if it contains non-English content
-        if normalized_tender["description"]:
-            description = normalized_tender["description"]
-            if "<" in description and ">" in description:
-                # Handle HTML content
-                original_desc = description
-                translated_desc = self._translate_html(description)
-                if translated_desc != original_desc:
-                    normalized_tender["metadata"]["original_description"] = original_desc
-                    normalized_tender["description"] = translated_desc
-                    print(f"Translated HTML description: {len(original_desc)} chars to {len(translated_desc)} chars")
-            else:
-                # Plain text description
-                original_desc = description
-                translated_desc = self._translate_text(description)
-                if translated_desc != original_desc:
-                    normalized_tender["metadata"]["original_description"] = original_desc
-                    normalized_tender["description"] = translated_desc
-                    print(f"Translated description: {len(original_desc)} chars to {len(translated_desc)} chars")
-
-        # Translate issuing authority if needed
-        if normalized_tender["issuing_authority"] and self._detect_non_english(normalized_tender["issuing_authority"]):
-            original_auth = normalized_tender["issuing_authority"]
-            translated_auth = self._translate_text(original_auth)
-            if translated_auth != original_auth:
-                normalized_tender["metadata"]["original_issuing_authority"] = original_auth
-                normalized_tender["issuing_authority"] = translated_auth
-
-        # Clear the current tender reference
-        self.current_tender = None
-                
-        return normalized_tender
-        
-    def _detect_non_english(self, text):
-        """Detect if text is likely not English based on common words and patterns."""
-        if not text or len(text) < 5:
-            return False
-            
-        # Simple fast check for non-ASCII characters
-        if any(ord(c) > 127 for c in text):
-            return True
-            
-        # List of common words in various European languages that aren't English words
-        non_english_words = [
-            # German
-            'der', 'die', 'das', 'und', 'für', 'mit', 'von', 'zu', 'ist', 'auf', 'nicht', 'ein', 'eine',
-            # French
-            'le', 'la', 'les', 'du', 'de', 'des', 'et', 'en', 'un', 'une', 'est', 'sont', 'avec', 'pour', 'dans',
-            # Spanish
-            'el', 'la', 'los', 'las', 'un', 'una', 'unos', 'unas', 'y', 'o', 'pero', 'porque', 'como', 'qué',
-            # Italian
-            'il', 'lo', 'la', 'i', 'gli', 'le', 'un', 'uno', 'una', 'del', 'della', 'e', 'ed', 'o', 'ma', 'perché',
-            # Portuguese
-            'o', 'a', 'os', 'as', 'um', 'uma', 'uns', 'umas', 'e', 'ou', 'mas', 'porque', 'como',
-            # Dutch
-            'de', 'het', 'een', 'en', 'van', 'voor', 'met', 'op', 'in', 'is', 'zijn', 'niet',
-            # Special foreign-language markers
-            'gmbh', 'mbh', 'sarl', 'bvba', 'sprl', 'ltda', 'aménagement', 'amélioration', 'développement',
-            'adquisición', 'suministro', 'construcción', 'rehabilitación'
-        ]
-        
-        # Convert text to lowercase and split into words
-        words = re.findall(r'\b\w+\b', text.lower())
-        
-        if not words:
-            return False
-            
-        # Count how many words match non-English common words
-        non_english_count = sum(1 for word in words if word in non_english_words)
-        
-        # If more than 5% of words are from non-English common words, consider it non-English
-        # Lower threshold to catch more cases
-        if len(words) > 5 and non_english_count / len(words) > 0.05:
-            return True
-            
-        # Check for common non-English characters: ä, ö, ü, é, è, ê, ñ, etc.
-        non_english_chars = 'äöüßéèêëàâçñøåæœÿòùìíîïðúû'
-        if any(c in non_english_chars for c in text.lower()):
-            return True
-            
-        return False
-
-    def _extract_field(self, data, possible_keys, default=None):
-        """Extract a field value from a dictionary using multiple possible keys."""
-        if not data or not isinstance(data, dict):
-            return default
-            
-        # Try all possible keys
-        for key in possible_keys:
-            if key in data and data[key] not in (None, "", "null", "undefined"):
-                return data[key]
-                
-        return default
-        
-    def _format_date(self, date_str):
-        """Format a date string to ISO format."""
-        if not date_str:
             return None
             
-        # Convert to string if needed
-        date_str = str(date_str)
-        
-        # Try to parse the date
         try:
-            # Handle common date formats
-            formats = [
-                '%Y-%m-%d',
-                '%Y-%m-%dT%H:%M:%S',
-                '%Y-%m-%dT%H:%M:%SZ',
-                '%d/%m/%Y',
-                '%m/%d/%Y',
-                '%d-%m-%Y',
-                '%m-%d-%Y',
-                '%d %b %Y',
-                '%b %d, %Y'
-            ]
+            # If source_name is not provided, use the current source
+            if not source_name and hasattr(self, '_current_source'):
+                source_name = self._current_source
+                
+            # Initialize normalized tender
+            normalized = {}
+            enriched_metadata = {}
+
+            # Basic fields
+            normalized["notice_id"] = self._extract_tender_id(tender, uuid.uuid4())
+            normalized["source"] = source_name or "unknown"
             
-            for fmt in formats:
-                try:
-                    return datetime.strptime(date_str, fmt).isoformat()
-                except ValueError:
-                    continue
+            # Try to extract content from known source formats or fall back to generic extraction
+            if source_name == "sam_gov":
+                # SAM.gov specific extraction
+                normalized["notice_title"] = self._extract_field(tender, ["subject", "title", "solicitationTitle"]) or "Untitled SAM.gov Tender"
+                normalized["description"] = self._clean_html(self._extract_field(tender, ["description", "body", "generalDescription"]) or "")
+                normalized["notice_type"] = self._extract_field(tender, ["type", "noticeType", "solicitationType"]) or "Default"
+                normalized["issuing_authority"] = self._extract_field(tender, ["office", "contractingOffice", "department", "agency"]) or "Unknown"
+                normalized["date_published"] = self._format_date(self._extract_field(tender, ["postedDate", "publishDate", "date", "datePosted"]))
+                normalized["closing_date"] = self._format_date(self._extract_field(tender, ["responseDeadLine", "closeDate", "deadlineDate", "responseDate"]))
+                
+                # Extract place of performance for sam.gov
+                place_of_performance = self._extract_field(tender, ["placeOfPerformance", "pop", "performanceLocation"])
+                if place_of_performance:
+                    if isinstance(place_of_performance, dict):
+                        # Try to get structured country info
+                        country_code = place_of_performance.get("countryCode", "")
+                        if country_code:
+                            normalized["country"] = self._standardize_country(country_code)
+                        
+                        # Get state and city
+                        state = place_of_performance.get("state", "")
+                        city = place_of_performance.get("city", "")
+                        if state or city:
+                            location_parts = [part for part in [city, state] if part]
+                            normalized["location"] = ", ".join(location_parts)
+                            
+                        # Save complete place of performance to metadata
+                        enriched_metadata["place_of_performance"] = place_of_performance
+                    elif isinstance(place_of_performance, str):
+                        normalized["location"] = place_of_performance
+                
+                # Additional metadata fields
+                enriched_metadata["naics_code"] = self._extract_field(tender, ["naicsCode", "naics"])
+                enriched_metadata["set_aside"] = self._extract_field(tender, ["setAside", "setAsideCode", "setAsideType"])
+                enriched_metadata["solicitation_number"] = self._extract_field(tender, ["solicitationNumber", "noticeId", "referenceNumber"])
+                
+                # Extract contact information
+                contact_info = self._extract_field(tender, ["pointOfContact", "contact", "contactInfo"])
+                if contact_info:
+                    if isinstance(contact_info, dict):
+                        normalized["contact_email"] = contact_info.get("email")
+                        normalized["contact_phone"] = contact_info.get("phone")
+                        # Save full contact to metadata
+                        enriched_metadata["contact_info"] = contact_info
+                    elif isinstance(contact_info, str):
+                        normalized["contact_information"] = contact_info
+                
+            elif source_name == "ted_eu":
+                # European TED specific extraction
+                normalized["notice_title"] = self._extract_field(tender, ["title", "contractTitle", "name"]) or "Untitled TED Tender"
+                normalized["description"] = self._clean_html(self._extract_field(tender, ["description", "shortDescription", "contractDescription"]) or "")
+                normalized["notice_type"] = self._extract_field(tender, ["procedureType", "contractType", "type"]) or "Default"
+                normalized["issuing_authority"] = self._extract_field(tender, ["contractingAuthority", "authority", "organization"]) or "Unknown"
+                normalized["date_published"] = self._format_date(self._extract_field(tender, ["publicationDate", "publishDate", "datePublished"]))
+                normalized["closing_date"] = self._format_date(self._extract_field(tender, ["submissionDeadline", "deadline", "closingDate"]))
+                normalized["country"] = self._standardize_country(self._extract_field(tender, ["country", "countryCode", "location"]) or "")
+                normalized["location"] = self._extract_field(tender, ["addressTown", "city", "place"]) or ""
+                
+                # Extract additional TED specific information
+                enriched_metadata["cpv_codes"] = self._extract_field(tender, ["cpvCodes", "cpvs", "commonProcurementVocabulary"])
+                enriched_metadata["nuts_code"] = self._extract_field(tender, ["nutsCode", "nuts"])
+                enriched_metadata["document_number"] = self._extract_field(tender, ["documentNumber", "tedDocumentNumber", "documentId"])
+                
+                # Extract value information
+                value_data = self._extract_field(tender, ["estimatedValue", "contractValue", "value"])
+                if value_data:
+                    if isinstance(value_data, dict):
+                        normalized["tender_value"] = self._extract_numeric(value_data.get("amount", ""))
+                        normalized["currency"] = value_data.get("currency", "")
+                    elif isinstance(value_data, str):
+                        normalized["tender_value"] = self._extract_numeric(value_data)
+                        normalized["currency"] = self._extract_currency(value_data)
                     
-            # If all fails, return as is
-            return date_str
-        except Exception:
-            return date_str
+            elif source_name == "ungm":
+                # UNGM specific extraction
+                normalized["notice_title"] = self._extract_field(tender, ["title", "tenderTitle", "subject"]) or "Untitled UNGM Tender"
+                normalized["description"] = self._clean_html(self._extract_field(tender, ["description", "summary", "details"]) or "")
+                normalized["notice_type"] = self._extract_field(tender, ["type", "category", "tenderType"]) or "Default"
+                normalized["issuing_authority"] = self._extract_field(tender, ["organization", "agency", "orgName"]) or "Unknown"
+                normalized["date_published"] = self._format_date(self._extract_field(tender, ["publishedDate", "postDate", "publicationDate"]))
+                normalized["closing_date"] = self._format_date(self._extract_field(tender, ["deadlineDate", "closingDate", "endDate"]))
+                normalized["country"] = self._standardize_country(self._extract_field(tender, ["country", "deliveryCountry", "location"]) or "")
+                normalized["location"] = self._extract_field(tender, ["city", "deliveryLocation", "place"]) or ""
+                
+                # UNGM specific metadata
+                enriched_metadata["reference"] = self._extract_field(tender, ["reference", "noticeNumber", "refNo"])
+                enriched_metadata["un_organization"] = self._extract_field(tender, ["unOrganization", "unAgency", "unEntity"])
+                enriched_metadata["deadline_timezone"] = self._extract_field(tender, ["timezone", "deadlineTimezone"]) 
             
-    def _extract_numeric(self, value):
-        """Extract numeric value from string."""
-        if not value:
-            return None
+            elif source_name == "wb" or source_name == "worldbank":
+                # World Bank specific extraction
+                normalized["notice_title"] = self._extract_field(tender, ["title", "projectTitle", "name"]) or "Untitled World Bank Tender"
+                normalized["description"] = self._clean_html(self._extract_field(tender, ["description", "projectDescription", "summary"]) or "")
+                normalized["notice_type"] = self._extract_field(tender, ["procurementType", "contractType", "type"]) or "Default"
+                normalized["issuing_authority"] = self._extract_field(tender, ["borrower", "client", "agency"]) or "Unknown"
+                normalized["date_published"] = self._format_date(self._extract_field(tender, ["publishedDate", "noticeDate", "publicationDate"]))
+                normalized["closing_date"] = self._format_date(self._extract_field(tender, ["bidDeadline", "closingDate", "dueDate"]))
+                normalized["country"] = self._standardize_country(self._extract_field(tender, ["country", "region", "location"]) or "")
+                normalized["location"] = self._extract_field(tender, ["city", "implementingAgency", "place"]) or ""
+                
+                # World Bank specific metadata
+                enriched_metadata["project_id"] = self._extract_field(tender, ["projectId", "projectNumber", "projId"])
+                enriched_metadata["financing"] = self._extract_field(tender, ["financing", "loanNo", "fundingSource"])
+                enriched_metadata["wb_region"] = self._extract_field(tender, ["region", "regionalDepartment"])
+                
+                # Extract value information if available
+                value_data = self._extract_field(tender, ["loanAmount", "projectCost", "contractValue"])
+                if value_data:
+                    if isinstance(value_data, dict):
+                        normalized["tender_value"] = self._extract_numeric(value_data.get("amount", ""))
+                        normalized["currency"] = value_data.get("currency", "")
+                    elif isinstance(value_data, str):
+                        normalized["tender_value"] = self._extract_numeric(value_data)
+                        normalized["currency"] = self._extract_currency(value_data)
             
-        # Convert to string
-        value = str(value)
+            # Generic extraction (fallback for all sources)
+            if not normalized.get("notice_title"):
+                # Try common title fields
+                normalized["notice_title"] = self._extract_field(tender, ["title", "name", "subject", "summary", "projectTitle", "tenderTitle", "contract_title", "tender_name"]) or f"Untitled Tender from {source_name}"
+                
+            if not normalized.get("description"):
+                # Try common description fields
+                description = self._extract_field(tender, ["description", "details", "body", "content", "text", "summary", "abstract", "project_description", "tender_description", "scope"])
+                normalized["description"] = self._clean_html(description or "")
+                
+            if not normalized.get("notice_type"):
+                # Try common type fields
+                normalized["notice_type"] = self._extract_field(tender, ["type", "category", "procurement_type", "tender_type", "contractType", "procedure_type", "noticeType"]) or "Default"
+                
+            if not normalized.get("issuing_authority"):
+                # Try common authority fields
+                normalized["issuing_authority"] = self._extract_field(tender, ["issuing_authority", "authority", "agency", "organization", "buyer", "department", "office", "contracting_authority", "client"]) or "Unknown"
+                
+            if not normalized.get("date_published"):
+                # Try common published date fields
+                published_date = self._extract_field(tender, ["date_published", "published_date", "publication_date", "post_date", "issue_date", "date", "publicationDate", "postDate"])
+                normalized["date_published"] = self._format_date(published_date)
+                
+            if not normalized.get("closing_date"):
+                # Try common closing date fields
+                closing_date = self._extract_field(tender, ["closing_date", "deadline", "due_date", "end_date", "closing", "submission_deadline", "bidDeadline", "response_date", "expiry_date", "closingDate", "deadlineDate"])
+                normalized["closing_date"] = self._format_date(closing_date)
+                
+                # If no closing date is found, estimate one based on publication date
+                if not normalized.get("closing_date") and normalized.get("date_published"):
+                    normalized["closing_date"] = self._extract_deadline_date(tender)
+                
+            if not normalized.get("country"):
+                # Try common country fields
+                country = self._extract_field(tender, ["country", "country_code", "nation", "region", "location", "place_of_performance", "delivery_country"])
+                normalized["country"] = self._standardize_country(country or "")
+                
+            if not normalized.get("location"):
+                # Try common location fields
+                normalized["location"] = self._extract_field(tender, ["location", "city", "place", "region", "district", "state", "province", "town", "address_town"]) or ""
+            
+            # Try to extract value and currency from various fields if not already set
+            if not normalized.get("tender_value"):
+                value = self._extract_field(tender, ["tender_value", "value", "price", "amount", "budget", "estimated_value", "contract_value", "bid_value", "total_value", "estimatedValue", "totalValue"])
+                if value:
+                    normalized["tender_value"] = self._extract_numeric(value)
+                    if not normalized.get("currency"):
+                        normalized["currency"] = self._extract_currency(value)
+                else:
+                    # Try to find value in description
+                    if normalized.get("description"):
+                        normalized["tender_value"] = self._extract_numeric(normalized["description"])
+                        if not normalized.get("currency") and normalized.get("tender_value"):
+                            normalized["currency"] = self._extract_currency(normalized["description"])
+            
+            # If currency is not found, try to extract it from various fields
+            if not normalized.get("currency"):
+                currency = self._extract_field(tender, ["currency", "tender_currency", "currency_code", "value_currency"])
+                if currency:
+                    normalized["currency"] = currency
+            
+            # Extract CPVs (Common Procurement Vocabulary) codes
+            cpvs = self._extract_field(tender, ["cpvs", "cpv_codes", "cpv", "common_procurement_vocabulary", "codes"])
+            if cpvs:
+                if isinstance(cpvs, list):
+                    normalized["cpvs"] = cpvs
+                elif isinstance(cpvs, str):
+                    normalized["cpvs"] = [cpvs]
+            
+            # Extract categories/tags
+            categories = self._extract_categories(normalized.get("description", ""), source_name)
+            if categories:
+                normalized["tag"] = categories
+            
+            # Add the URL if available
+            url = self._extract_field(tender, ["url", "link", "tender_url", "notice_url", "document_url", "external_url", "web_link"])
+            if url:
+                normalized["url"] = url
+            
+            # Add the buyer info if available
+            buyer = self._extract_field(tender, ["buyer", "buyer_name", "purchaser", "contracting_authority", "contracting_entity", "client"])
+            if buyer:
+                normalized["buyer"] = buyer
+                
+            # Add contact information if available 
+            contact_email = self._extract_field(tender, ["contact_email", "email", "enquiry_email", "contact_mail", "inquiry_email"])
+            if contact_email:
+                normalized["contact_email"] = contact_email
+                
+            contact_phone = self._extract_field(tender, ["contact_phone", "phone", "telephone", "tel", "contact_number", "inquiry_phone"])
+            if contact_phone:
+                normalized["contact_phone"] = contact_phone
+            
+            # Create structured metadata
+            metadata = {}
+            
+            # Add source data metadata
+            raw_id = self._extract_field(tender, ["id", "tender_id", "notice_id", "reference", "ref_no", "reference_number"])
+            if raw_id:
+                normalized["raw_id"] = str(raw_id)
+                metadata["original_id"] = raw_id
+            
+            # Add source metadata
+            source_info = {}
+            
+            if source_name == "sam_gov":
+                source_info["type"] = "US Federal Government"
+                if not normalized.get("country"):
+                    normalized["country"] = "United States"
+            elif source_name == "ted_eu":
+                source_info["type"] = "European Union"
+            elif source_name == "ungm":
+                source_info["type"] = "United Nations"
+            elif source_name == "wb" or source_name == "worldbank":
+                source_info["type"] = "World Bank"
+            elif source_name == "adb":
+                source_info["type"] = "Asian Development Bank"
+            elif source_name == "afdb":
+                source_info["type"] = "African Development Bank"
+            elif source_name == "iadb":
+                source_info["type"] = "Inter-American Development Bank"
+                
+            if source_info:
+                metadata["source_info"] = source_info
+            
+            # Add all extra found metadata fields
+            if enriched_metadata:
+                metadata.update(enriched_metadata)
+            
+            # Add processing metadata
+            metadata["processed_at"] = self._get_current_timestamp()
+            metadata["version"] = "2.0"
+            
+            # Store the original tender in metadata if it's a simple structure
+            try:
+                if isinstance(tender, dict) and len(str(tender)) < 10000:
+                    metadata["original_data"] = tender
+            except:
+                pass
+            
+            normalized["metadata"] = metadata
+            
+            return normalized
         
-        # Remove currency symbols and formatting
-        for char in ['$', '€', '£', '¥', ',', ' ', 'USD', 'EUR', 'GBP']:
-            value = value.replace(char, '')
-            
-        # Try to convert to float
-        try:
-            return float(value)
-        except ValueError:
+        except Exception as e:
+            error_message = f"Error normalizing tender: {e}"
+            print(error_message)
+            if source_name:
+                self._insert_error(str(source_name), "normalization_error", error_message, str(tender) if tender else "")
             return None
 
     def _extract_tender_data(self, content, source):
@@ -1906,8 +1488,68 @@ class TenderTrailIntegration:
         
         return result
 
+    def _detect_potential_duplicate(self, tender, normalized_tenders):
+        """Check if a tender might be a duplicate of already processed tenders."""
+        if not tender or not normalized_tenders:
+            return False
+            
+        # Extract key fields for comparison
+        title = tender.get("notice_title", "").lower()
+        ref_num = tender.get("notice_id", "").lower()
+        
+        # Skip short titles or reference numbers that are too generic
+        if len(title) < 10 or len(ref_num) < 3:
+            return False
+            
+        # Check for exact match by reference number
+        for existing in normalized_tenders:
+            existing_ref = existing.get("notice_id", "").lower()
+            if existing_ref and existing_ref == ref_num:
+                print(f"Potential duplicate detected by reference: {ref_num}")
+                return True
+                
+        # Check for high similarity in titles
+        for existing in normalized_tenders:
+            existing_title = existing.get("notice_title", "").lower()
+            
+            # Skip comparison with short titles
+            if len(existing_title) < 10:
+                continue
+                
+            # Very simple similarity check - more sophisticated would use edit distance
+            # But this is efficient for a quick check
+            
+            # 1. Check for exact title match
+            if title == existing_title:
+                print(f"Potential duplicate detected by exact title: {title[:30]}...")
+                return True
+                
+            # 2. Check if title is substring of existing or vice versa
+            if title in existing_title or existing_title in title:
+                print(f"Potential duplicate detected by title substring: {title[:30]}...")
+                return True
+                
+            # 3. Check for word overlap (if enough words match)
+            title_words = set(title.split())
+            existing_words = set(existing_title.split())
+            
+            if len(title_words) > 3 and len(existing_words) > 3:
+                common_words = title_words.intersection(existing_words)
+                
+                # If more than 70% words match, likely a duplicate
+                if len(common_words) / min(len(title_words), len(existing_words)) > 0.7:
+                    print(f"Potential duplicate detected by word similarity: {title[:30]}...")
+                    return True
+                    
+        return False
+
     def _validate_normalized_tender(self, tender):
         """Validate a normalized tender to ensure required fields are present."""
+        # Return None if tender is invalid
+        if not tender:
+            return None
+            
+        # Required fields from previous version
         required_fields = ["notice_id", "notice_title", "source"]
         
         for field in required_fields:
@@ -1947,6 +1589,78 @@ class TenderTrailIntegration:
             if not self._is_valid_date_format(tender["closing_date"]):
                 tender["closing_date"] = None
         
+        # Enhanced validation for data quality
+        
+        # Ensure description is clean and not just an error message
+        description = tender.get("description", "")
+        if description:
+            # Check if description is too short to be useful
+            if len(description.strip()) < 20:
+                print(f"Warning: Description too short ({len(description)} chars), might not be useful")
+                
+            # Check if description is likely an error message
+            error_indicators = ["error", "not found", "404", "403", "access denied", 
+                               "forbidden", "unavailable", "sorry", "cannot access"]
+            
+            if any(indicator in description.lower() for indicator in error_indicators) and len(description) < 200:
+                print(f"Warning: Description appears to be an error message: {description[:100]}...")
+                # Don't reject, but mark in metadata
+                if not isinstance(tender.get("metadata"), dict):
+                    tender["metadata"] = {}
+                tender["metadata"]["possible_error"] = True
+                
+        # Ensure country is properly formatted 
+        if tender.get("country") and isinstance(tender["country"], str):
+            tender["country"] = self._standardize_country(tender["country"])
+            
+        # Validate and clean URLs
+        if tender.get("url") and isinstance(tender["url"], str):
+            url = tender["url"].strip()
+            
+            # Add http:// prefix if missing
+            if not (url.startswith("http://") or url.startswith("https://")):
+                url = "http://" + url
+                
+            # Simple URL validation
+            if re.match(r'^https?://[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)+(:[0-9]+)?(/.*)?$', url):
+                tender["url"] = url
+            else:
+                # URL doesn't look valid, save to metadata
+                if not isinstance(tender.get("metadata"), dict):
+                    tender["metadata"] = {}
+                tender["metadata"]["original_url"] = url
+                tender["url"] = None
+                
+        # Fix lists that should be strings
+        for field in ["contact_email", "contact_phone", "issuing_authority"]:
+            if isinstance(tender.get(field), list):
+                if tender[field]:
+                    # Join list items with commas
+                    tender[field] = ", ".join(str(item) for item in tender[field] if item)
+                else:
+                    tender[field] = None
+                    
+        # Make sure currency is standardized
+        if tender.get("currency") and isinstance(tender["currency"], str):
+            # Normalize currency code
+            curr = tender["currency"].strip().upper()
+            # Map common variants
+            currency_map = {
+                "US$": "USD", "USD$": "USD", "$": "USD", "DOLLAR": "USD", "DOLLARS": "USD",
+                "€": "EUR", "EURO": "EUR", "EUROS": "EUR",
+                "£": "GBP", "UKP": "GBP", "POUND": "GBP", "POUNDS": "GBP",
+                "¥": "JPY", "YEN": "JPY",
+                "₹": "INR", "RUPEE": "INR", "RUPEES": "INR"
+            }
+            tender["currency"] = currency_map.get(curr, curr)
+            
+        # Ensure tender value is numeric
+        if tender.get("tender_value") and not isinstance(tender["tender_value"], (int, float)):
+            try:
+                tender["tender_value"] = float(tender["tender_value"])
+            except (ValueError, TypeError):
+                tender["tender_value"] = None
+                
         return tender
 
     def _create_exec_sql_function(self):
@@ -2012,29 +1726,29 @@ class TenderTrailIntegration:
             print("Cannot create unified_tenders table in API-only mode")
             print("Please create the table using the Supabase UI or SQL Editor with this schema:")
             print("""
-            CREATE TABLE IF NOT EXISTS unified_tenders (
-                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+            CREATE TABLE IF NOT EXISTS public.unified_tenders (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 title TEXT,
                 description TEXT,
-                date_published TIMESTAMP,
-                closing_date TIMESTAMP,
-                tender_value NUMERIC,
+                date_published DATE,
+                closing_date DATE,
+                tender_type TEXT,
+                tender_value TEXT,
                 tender_currency TEXT,
                 location TEXT,
-                country TEXT, -- Added country field
                 issuing_authority TEXT,
                 keywords TEXT,
-                tender_type TEXT,
-                project_size TEXT,
                 contact_information TEXT,
                 source TEXT,
+                url TEXT,
+                buyer TEXT,
                 raw_id TEXT,
-                processed_at TIMESTAMP DEFAULT NOW(),
-                created_at TIMESTAMP DEFAULT NOW(),
-                metadata JSONB
+                processed_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+                metadata JSONB,
+                CONSTRAINT unified_tenders_source_raw_id_unique UNIQUE (source, raw_id)
             );
             
-            CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+            CREATE INDEX IF NOT EXISTS unified_tenders_source_idx ON public.unified_tenders (source);
             """)
             
             # Try inserting into the table anyway - it might exist but select was rejected due to permissions
@@ -2194,104 +1908,159 @@ class TenderTrailIntegration:
         import datetime
         return datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ')
 
-    def _translate_text(self, text, max_chunk_size=4000):
-        """Translate text from any language to English with chunking for long content"""
-        if not text or not self.translation_available or not self.translator:
-            return text
+    def _extract_address_information(self, description):
+        """Extract address information from description text."""
+        if not description or not isinstance(description, str):
+            return {}
             
-        try:
-            # Handle empty or very short text
-            if not text or len(text) < 5:
-                return text
+        address_info = {}
+        
+        # Common address indicators
+        address_indicators = [
+            r'address\s*:\s*([^\.;]*[0-9][^\.;]*)',
+            r'located at\s*[:-]?\s*([^\.;]*[0-9][^\.;]*)',
+            r'location\s*[:-]?\s*([^\.;]*[0-9][^\.;]*)',
+            r'([A-Za-z0-9\s]+,\s*[A-Za-z\s]+,\s*[A-Z]{2}\s*\d{5})',  # US format: Street, City, ST ZIPCODE
+            r'([A-Za-z0-9\s]+,\s*[A-Za-z\s]+,\s*[A-Z]{2})',  # US format without zip: Street, City, ST
+            r'([A-Za-z0-9\s]+,\s*[A-Za-z\s]+,\s*[A-Z]{2}\s*\d{5})',  # EU format: Street, City ZIPCODE
+        ]
+        
+        for pattern in address_indicators:
+            matches = re.findall(pattern, description, re.IGNORECASE)
+            if matches:
+                # Take the longest match as it likely contains more information
+                longest_match = max(matches, key=len)
+                address_info['full_address'] = longest_match.strip()
+                break
                 
-            # Check if translation is needed
-            if not self._detect_non_english(text):
-                return text
-                
-            # Use cache to avoid duplicate translations
-            cache_key = f"txt:{hash(text[:100])}"
-            if cache_key in self.translation_cache:
-                return self.translation_cache[cache_key]
-                
-            # For long texts, break into chunks (API limits)
-            if len(text) > max_chunk_size:
-                # Split by paragraphs to maintain semantic units
-                chunks = []
-                paragraphs = re.split(r'(\r?\n\r?\n|\<\/p\>)', text)
-                current_chunk = ""
-                
-                for para in paragraphs:
-                    if len(current_chunk) + len(para) > (max_chunk_size * 0.9):  # 90% of limit
-                        chunks.append(current_chunk)
-                        current_chunk = para
-                    else:
-                        current_chunk += para
-                        
-                # Add the last chunk if not empty
-                if current_chunk:
-                    chunks.append(current_chunk)
-                
-                # Translate each chunk
-                translated_chunks = []
-                for chunk in chunks:
-                    translated = self.translator.translate(chunk)
-                    if translated:
-                        translated_chunks.append(translated)
-                    else:
-                        translated_chunks.append(chunk)  # Fallback to original if translation fails
-                
-                result = "".join(translated_chunks)
-            else:
-                # Translate as a single piece
-                result = self.translator.translate(text)
-                
-            # Store in cache if successful
-            if result and result != text:
-                self.translation_cache[cache_key] = result
-                return result
-            
-            return text  # Return original if translation failed
-        except Exception as e:
-            print(f"Translation error: {str(e)[:100]}...")
-            return text
-            
-    def _translate_html(self, html_content):
-        """Extract and translate text from HTML content while preserving tags"""
-        if not html_content or not self.translation_available:
-            return html_content
-            
-        try:
-            # Simple check if translation might be needed
-            if not self._detect_non_english(html_content):
-                return html_content
-                
-            # Cache check 
-            cache_key = f"html:{hash(html_content[:100])}"
-            if cache_key in self.translation_cache:
-                return self.translation_cache[cache_key]
-            
-            # Simple HTML parser for paragraphs - will preserve most common tags
-            parts = re.split(r'(<[^>]*>)', html_content)
-            translated_parts = []
-            
-            for part in parts:
-                if part.startswith('<') and part.endswith('>'):
-                    # This is an HTML tag, don't translate
-                    translated_parts.append(part)
+        # Try to extract postal/zip code
+        zip_patterns = [
+            r'\b([A-Z]{1,2}\d{1,2}[A-Z]?\s*\d[A-Z]{2})\b',  # UK format
+            r'\b(\d{5}(-\d{4})?)\b',  # US format
+            r'\b([A-Z]\d[A-Z]\s*\d[A-Z]\d)\b',  # Canadian format
+            r'\b(\d{4}\s*[A-Z]{2})\b',  # Dutch format
+            r'\b(\d{5})\b'  # Simple 5-digit format
+        ]
+        
+        for pattern in zip_patterns:
+            matches = re.findall(pattern, description, re.IGNORECASE)
+            if matches:
+                # Take the first match
+                if isinstance(matches[0], tuple):
+                    # Some regex groups return tuples
+                    zipcode = matches[0][0].strip()
                 else:
-                    # This is content, translate it
-                    if part.strip():  # Only translate non-empty content
-                        translated_parts.append(self._translate_text(part))
-                    else:
-                        translated_parts.append(part)
-            
-            result = ''.join(translated_parts)
-            
-            # Store in cache if successful
-            if result and result != html_content:
-                self.translation_cache[cache_key] = result
+                    zipcode = matches[0].strip()
+                address_info['postal_code'] = zipcode
+                break
                 
-            return result
-        except Exception as e:
-            print(f"HTML translation error: {str(e)[:100]}...")
-            return html_content
+        return address_info
+
+    def _enhanced_process_raw_tenders(self, raw_data, source_name=None):
+        """
+        Enhanced processing of raw tenders with better validation and duplicate detection.
+        
+        Args:
+            raw_data (list): List of raw tender data
+            source_name (str): Optional source name for context-specific processing
+            
+        Returns:
+            list: List of normalized tenders
+        """
+        if not raw_data:
+            return []
+            
+        print(f"Processing {len(raw_data)} raw tenders with enhanced validation")
+        
+        # Track already processed tenders to avoid duplicates
+        processed_tenders = []
+        skipped_tenders = 0
+        error_tenders = 0
+        
+        # First pass to clean and standardize data
+        cleaned_data = []
+        for item in raw_data:
+            try:
+                # First check if it's a string that needs to be parsed
+                if isinstance(item, str):
+                    try:
+                        parsed_item = json.loads(item)
+                        cleaned_data.append(parsed_item)
+                        continue
+                    except json.JSONDecodeError:
+                        # Not valid JSON, keep as is
+                        cleaned_data.append(item)
+                        continue
+                
+                # If it's a dict, use it directly
+                if isinstance(item, dict):
+                    cleaned_data.append(item)
+                    continue
+                    
+                # If it has a 'data' field that contains the tender
+                if hasattr(item, 'get') and callable(item.get):
+                    try:
+                        data = item.get('data')
+                        if data is not None:
+                            if isinstance(data, str):
+                                try:
+                                    parsed_data = json.loads(data)
+                                    cleaned_data.append(parsed_data)
+                                    continue
+                                except:
+                                    # Not valid JSON, keep the string
+                                    cleaned_data.append(data)
+                                    continue
+                            else:
+                                cleaned_data.append(data)
+                                continue
+                    except:
+                        # Fallback if get fails
+                        pass
+                
+                # Add the item as-is
+                cleaned_data.append(item)
+                
+            except Exception as e:
+                print(f"Error pre-processing raw tender item: {e}")
+                error_tenders += 1
+        
+        # Second pass to normalize and validate
+        for tender in cleaned_data:
+            try:
+                # Normalize the tender
+                normalized_tender = self._normalize_tender(tender, source_name)
+                
+                if not normalized_tender:
+                    skipped_tenders += 1
+                    continue
+                    
+                # Check if this might be a duplicate of something we already processed
+                if self._detect_potential_duplicate(normalized_tender, processed_tenders):
+                    print(f"Skipping potential duplicate: {normalized_tender.get('notice_title', '')[:50]}...")
+                    skipped_tenders += 1
+                    continue
+                    
+                # Validate and clean the tender data
+                validated_tender = self._validate_normalized_tender(normalized_tender)
+                
+                if validated_tender:
+                    # Extract address info if available
+                    if 'description' in validated_tender and validated_tender['description']:
+                        address_info = self._extract_address_information(validated_tender['description'])
+                        if address_info:
+                            # Add to metadata
+                            if not isinstance(validated_tender.get('metadata'), dict):
+                                validated_tender['metadata'] = {}
+                            validated_tender['metadata']['address_info'] = address_info
+                    
+                    processed_tenders.append(validated_tender)
+                else:
+                    skipped_tenders += 1
+                    
+            except Exception as e:
+                print(f"Error during tender normalization: {e}")
+                error_tenders += 1
+        
+        print(f"Enhanced processing results: {len(processed_tenders)} valid tenders, {skipped_tenders} skipped, {error_tenders} errors")
+        return processed_tenders
