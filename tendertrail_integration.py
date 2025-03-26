@@ -53,8 +53,6 @@ class TenderTrailIntegration:
         
         1. process_source(tenders, source_name, create_tables=True) - Process a list of tenders
         2. process_source(source_name, batch_size=100, create_tables=True) - Load tenders from database
-        
-        The method automatically detects which pattern is being used based on the types of arguments.
         """
         # Detect which call pattern is being used
         if isinstance(tenders_or_source, (list, tuple)) or (isinstance(tenders_or_source, str) and source_name_or_batch_size is not None):
@@ -66,6 +64,12 @@ class TenderTrailIntegration:
             # Second pattern: process_source(source_name, batch_size)
             source_name = tenders_or_source
             batch_size = source_name_or_batch_size or 100
+            
+            # Skip processing if source_name is a single character
+            if isinstance(source_name, str) and len(source_name.strip()) <= 1:
+                print(f"Skipping invalid source name: {source_name}")
+                return 0, 0
+                
             # Get tenders from database
             tenders = self._get_raw_tenders(source_name, batch_size)
         
@@ -80,14 +84,28 @@ class TenderTrailIntegration:
                 print(f"No tenders to process for source: {source_name}")
                 return 0, 0
             
+            # Skip if tenders is just a string (likely a source name character)
+            if isinstance(tenders, str) and len(tenders.strip()) <= 1:
+                print(f"Skipping invalid tender data: {tenders}")
+                return 0, 0
+            
             # Track statistics
             processed_count = 0
             error_count = 0
             normalized_tenders = []
             
+            # Ensure tenders is a list
+            if not isinstance(tenders, (list, tuple)):
+                tenders = [tenders]
+            
             # Process each tender
             for tender in tenders:
                 try:
+                    # Skip single character strings
+                    if isinstance(tender, str) and len(tender.strip()) <= 1:
+                        print(f"Skipping single character tender: {tender}")
+                        continue
+                        
                     # First attempt direct normalization (preferred for known source formats)
                     normalized_tender = self._normalize_tender(tender, source_name)
                     
