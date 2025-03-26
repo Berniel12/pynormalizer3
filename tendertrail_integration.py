@@ -559,6 +559,11 @@ class TenderTrailIntegration:
                                 tender['raw_data'] = json.dumps(tender)
                             processed.append(tender)
                         elif isinstance(tender, str):
+                            # Skip single character strings as they're likely not valid tenders
+                            if len(tender.strip()) <= 1:
+                                print(f"Skipping single character tender: {tender}")
+                                continue
+                                
                             try:
                                 parsed = json.loads(tender)
                                 if isinstance(parsed, dict):
@@ -604,6 +609,11 @@ class TenderTrailIntegration:
                         ids = []
                         processed = []
                         for item in response.data:
+                            # Skip single character strings
+                            if isinstance(item, str) and len(item.strip()) <= 1:
+                                print(f"Skipping single character tender: {item}")
+                                continue
+                                
                             if isinstance(item, dict):
                                 # Ensure source name is correct
                                 item['source'] = source_name
@@ -647,6 +657,11 @@ class TenderTrailIntegration:
                         # Process tenders and ensure source name is preserved
                         processed = []
                         for item in response.data:
+                            # Skip single character strings
+                            if isinstance(item, str) and len(item.strip()) <= 1:
+                                print(f"Skipping single character tender: {item}")
+                                continue
+                                
                             if isinstance(item, dict):
                                 # Ensure source name is correct
                                 item['source'] = source_name
@@ -760,7 +775,7 @@ class TenderTrailIntegration:
             
             # Field mapping between normalized tender fields and database fields
             field_mapping = {
-                "notice_title": "title",
+                "notice_title": "title",  # Map notice_title to title field
                 "notice_type": "tender_type",
                 "issuing_authority": "issuing_authority",
                 "date_published": "date_published",
@@ -1175,7 +1190,7 @@ class TenderTrailIntegration:
             normalized = {
                 "notice_id": tender.get('notice_id', str(uuid.uuid4())),
                 "notice_type": tender.get('type', tender.get('notice_type', 'Default')),
-                "notice_title": tender.get('title', tender.get('name', f"Tender from {source}")),
+                "notice_title": tender.get('title', tender.get('name', tender.get('notice_title', f"Tender from {source}"))),
                 "description": tender.get('description', tender.get('details', tender.get('summary', tender.get('content', '')))),
                 "country": tender.get('country', tender.get('nation', '')),
                 "location": tender.get('location', tender.get('place', tender.get('country', ''))),
