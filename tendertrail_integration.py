@@ -861,22 +861,21 @@ class TenderTrailIntegration:
                 CREATE TABLE IF NOT EXISTS unified_tenders (
                     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
                     title TEXT,
-                    source TEXT,
                     description TEXT,
-                    issuing_authority TEXT,
-                    country TEXT, 
-                    location TEXT,
                     date_published TIMESTAMP,
                     closing_date TIMESTAMP,
                     tender_value NUMERIC,
-                    currency TEXT,
-                    categories TEXT,
-                    contact_email TEXT,
-                    contact_phone TEXT,
-                    url TEXT,
-                    status TEXT DEFAULT 'active',
+                    tender_currency TEXT,
+                    location TEXT,
+                    issuing_authority TEXT,
+                    keywords TEXT,
+                    tender_type TEXT,
+                    project_size TEXT,
+                    contact_information TEXT,
+                    source TEXT,
+                    raw_id TEXT,
+                    processed_at TIMESTAMP DEFAULT NOW(),
                     created_at TIMESTAMP DEFAULT NOW(),
-                    updated_at TIMESTAMP DEFAULT NOW(),
                     metadata JSONB
                 );
                 -- Add extension for UUID generation if not exists
@@ -905,32 +904,38 @@ class TenderTrailIntegration:
                 "source": tender.get("source", "unknown"),
                 "description": tender.get("description", ""),
                 "issuing_authority": tender.get("issuing_authority", ""),
-                "country": tender.get("country", ""),
                 "location": tender.get("location", ""),
                 "date_published": tender.get("date_published"),
                 "closing_date": tender.get("closing_date"),
                 "tender_value": tender.get("tender_value"),
+                "tender_type": tender.get("notice_type", ""),
+                "contact_information": f"{tender.get('contact_email', '')} {tender.get('contact_phone', '')}".strip(),
+                "keywords": "",  # Will be generated from description later if needed
                 "currency": tender.get("currency", ""),
-                "categories": tender.get("categories", ""),
-                "contact_email": tender.get("contact_email", ""),
-                "contact_phone": tender.get("contact_phone", ""),
                 "url": tender.get("url", ""),
                 "metadata": tender.get("metadata", "{}")
             }
             
-            # Ensure bid_reference_no is stored in metadata instead
-            if tender.get("bid_reference_no"):
-                if isinstance(record["metadata"], str):
-                    try:
-                        metadata_dict = json.loads(record["metadata"])
-                        metadata_dict["bid_reference_no"] = tender.get("bid_reference_no")
-                        record["metadata"] = json.dumps(metadata_dict)
-                    except:
-                        # If parsing fails, create new metadata JSON
-                        record["metadata"] = json.dumps({"bid_reference_no": tender.get("bid_reference_no")})
-                else:
-                    # If metadata is a dict already
-                    record["metadata"]["bid_reference_no"] = tender.get("bid_reference_no")
+            # Store categories and other non-matching fields in metadata
+            fields_for_metadata = ["categories", "bid_reference_no", "country", "contact_email", "contact_phone"]
+            metadata_dict = {}
+            
+            # Parse existing metadata if it's a string
+            if isinstance(record["metadata"], str):
+                try:
+                    metadata_dict = json.loads(record["metadata"])
+                except:
+                    metadata_dict = {}
+            else:
+                metadata_dict = record["metadata"]
+                
+            # Add fields to metadata
+            for field in fields_for_metadata:
+                if tender.get(field):
+                    metadata_dict[field] = tender.get(field)
+                    
+            # Convert metadata back to string if needed
+            record["metadata"] = json.dumps(metadata_dict) if isinstance(record["metadata"], dict) else record["metadata"]
             
             # Translate title and description if needed and translation is available
             if translation_available and record["description"]:
@@ -1543,29 +1548,28 @@ class TenderTrailIntegration:
             print("Cannot create unified_tenders table in API-only mode")
             print("Please create the table using the Supabase UI or SQL Editor with this schema:")
             print("""
-            CREATE TABLE IF NOT EXISTS public.unified_tenders (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            CREATE TABLE IF NOT EXISTS unified_tenders (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
                 title TEXT,
                 description TEXT,
-                date_published DATE,
-                closing_date DATE,
-                tender_type TEXT,
-                tender_value TEXT,
+                date_published TIMESTAMP,
+                closing_date TIMESTAMP,
+                tender_value NUMERIC,
                 tender_currency TEXT,
                 location TEXT,
                 issuing_authority TEXT,
                 keywords TEXT,
+                tender_type TEXT,
+                project_size TEXT,
                 contact_information TEXT,
                 source TEXT,
-                url TEXT,
-                buyer TEXT,
                 raw_id TEXT,
-                processed_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
-                metadata JSONB,
-                CONSTRAINT unified_tenders_source_raw_id_unique UNIQUE (source, raw_id)
+                processed_at TIMESTAMP DEFAULT NOW(),
+                created_at TIMESTAMP DEFAULT NOW(),
+                metadata JSONB
             );
             
-            CREATE INDEX IF NOT EXISTS unified_tenders_source_idx ON public.unified_tenders (source);
+            CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
             """)
             
             # Try inserting into the table anyway - it might exist but select was rejected due to permissions
