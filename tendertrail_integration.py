@@ -547,6 +547,7 @@ class TenderTrailIntegration:
             try:
                 response = self.supabase.table(table_name).select('*').limit(batch_size).execute()
                 if response and response.data:
+                    print(f"Found {len(response.data)} tenders in {table_name}")
                     # Process tenders and ensure source name is preserved
                     processed = []
                     for tender in response.data:
@@ -556,6 +557,7 @@ class TenderTrailIntegration:
                             # Store raw data if not already present
                             if 'raw_data' not in tender:
                                 tender['raw_data'] = json.dumps(tender)
+                            processed.append(tender)
                         elif isinstance(tender, str):
                             try:
                                 parsed = json.loads(tender)
@@ -577,18 +579,28 @@ class TenderTrailIntegration:
                                     'source': source_name,
                                     'raw_data': tender
                                 }
-                        processed.append(tender)
+                            processed.append(tender)
+                    print(f"Processed {len(processed)} tenders from {table_name}")
                     return processed
             except Exception as e:
                 print(f"Table {table_name} not found, trying direct source table {source_name}")
             
             # Try direct source name as table
             try:
+                # Print a sample of the first tender to diagnose issues
+                try:
+                    sample_response = self.supabase.table(source_name).select('*').limit(1).execute()
+                    if sample_response and sample_response.data:
+                        print(f"Sample tender from {source_name}: {json.dumps(sample_response.data[0])[:500]}...")
+                except Exception as sample_e:
+                    print(f"Error getting sample tender: {sample_e}")
+                
                 # First try with processed field
                 try:
                     response = self.supabase.table(source_name).select('*').eq('processed', False).limit(batch_size).execute()
                     # Mark processed records
                     if response and response.data:
+                        print(f"Found {len(response.data)} unprocessed tenders in {source_name}")
                         ids = []
                         processed = []
                         for item in response.data:
@@ -1254,54 +1266,162 @@ class TenderTrailIntegration:
         Attempt to extract meaningful tender data from a string or non-dict content.
         """
         try:
+            # Print some debug info to see what we're working with
+            content_preview = content[:100] if isinstance(content, str) else str(content)[:100]
+            print(f"Extracting data from content type {type(content)}: {content_preview}...")
+            
             # If content is a string, try to identify structured data
             if isinstance(content, str):
+                # If it's a single character or very short, treat it as an ID and try to fetch the full tender
+                if len(content.strip()) < 10 and content.strip().isalnum():
+                    print(f"Content is very short, trying to use it as an ID: {content}")
+                    try:
+                        # Try to fetch from the source table using content as ID
+                        response = self.supabase.table(source).select('*').eq('id', content).execute()
+                        if response and response.data and len(response.data) > 0:
+                            print(f"Found tender by ID {content}")
+                            return {**response.data[0], 'source': source}
+                    except Exception as e:
+                        print(f"Failed to fetch tender by ID: {e}")
+                
                 # Try to identify XML
                 if content.strip().startswith('<?xml') or content.strip().startswith('<'):
                     import xml.etree.ElementTree as ET
                     try:
                         root = ET.fromstring(content)
                         return self._xml_to_dict(root)
-                    except:
-                        pass
+                    except Exception as xml_e:
+                        print(f"Failed to parse XML: {xml_e}")
+                
+                # Try to identify HTML and extract content
+                if content.strip().startswith('<html') or '<body' in content:
+                    try:
+                        from bs4 import BeautifulSoup
+                        soup = BeautifulSoup(content, 'html.parser')
+                        
+                        # Extract title
+                        title = soup.title.string if soup.title else None
+                        
+                        # Extract main content
+                        main_content = ''
+                        for paragraph in soup.find_all('p'):
+                            if paragraph.text and len(paragraph.text.strip()) > 10:
+                                main_content += paragraph.text.strip() + "\n\n"
+                        
+                        # Extract all text if main content is empty
+                        if not main_content:
+                            main_content = soup.get_text()
+                        
+                        return {
+                            'title': title or f"Tender from {source}",
+                            'description': main_content[:2000],
+                            'source': source,
+                            'content': content,
+                            'raw_data': content
+                        }
+                    except ImportError:
+                        print("BeautifulSoup not installed, skipping HTML parsing")
+                    except Exception as html_e:
+                        print(f"Failed to parse HTML: {html_e}")
+                
+                # Try to identify JSON-like structure
+                if '{' in content and '}' in content:
+                    try:
+                        # Find all JSON-like structures in the text
+                        import re
+                        json_matches = re.findall(r'\{[^{}]*\}', content)
+                        for json_str in json_matches:
+                            try:
+                                parsed = json.loads(json_str)
+                                if isinstance(parsed, dict) and len(parsed) > 2:
+                                    parsed['source'] = source
+                                    return parsed
+                            except:
+                                continue
+                    except Exception as json_e:
+                        print(f"Failed to extract JSON: {json_e}")
                 
                 # Try to identify key-value pairs in the text
                 data = {}
                 lines = content.split('\n')
                 for line in lines:
                     if ':' in line:
-                        key, value = line.split(':', 1)
-                        key = key.strip().lower().replace(' ', '_')
-                        value = value.strip()
-                        if value:
-                            data[key] = value
+                        parts = line.split(':', 1)
+                        if len(parts) == 2:
+                            key, value = parts
+                            key = key.strip().lower().replace(' ', '_')
+                            value = value.strip()
+                            if value:
+                                data[key] = value
                 
-                if data:
+                if len(data) > 2:
                     data['source'] = source
                     return data
             
             # If content is a list, try to convert it to a meaningful dictionary
             elif isinstance(content, list):
-                data = {}
-                for i, item in enumerate(content):
-                    if isinstance(item, dict):
-                        data.update(item)
+                if len(content) > 0:
+                    if all(isinstance(item, dict) for item in content):
+                        # Merge all dictionaries
+                        data = {}
+                        for item in content:
+                            data.update(item)
+                        data['source'] = source
+                        return data
+                    elif len(content) == 1:
+                        # If it's a single item, use that
+                        if isinstance(content[0], dict):
+                            content[0]['source'] = source
+                            return content[0]
+                        else:
+                            return {
+                                'content': str(content[0]),
+                                'source': source,
+                            }
                     else:
-                        data[f'item_{i}'] = str(item)
-                if data:
-                    data['source'] = source
-                    return data
+                        # For multiple items
+                        data = {}
+                        for i, item in enumerate(content):
+                            if isinstance(item, dict):
+                                for k, v in item.items():
+                                    data[k] = v
+                            else:
+                                data[f'item_{i}'] = str(item)
+                        data['source'] = source
+                        return data
             
-            # For other types, create a simple wrapper
-            return {
-                'content': str(content),
-                'source': source
-            }
+            # For other types, try to extract meaningful data
+            elif isinstance(content, dict):
+                # Already a dictionary, just ensure source is set
+                content['source'] = source
+                return content
+            
+            # If all extraction attempts fail, create a basic wrapper
+            print(f"Failed to extract structured data from content, creating basic wrapper")
+            if isinstance(content, str):
+                return {
+                    'title': f"Tender from {source}",
+                    'description': content[:2000] if len(content) > 0 else f"Tender from {source}",
+                    'source': source,
+                    'content': content,
+                    'raw_data': content
+                }
+            else:
+                return {
+                    'title': f"Tender from {source}",
+                    'description': str(content)[:2000] if str(content) else f"Tender from {source}",
+                    'source': source,
+                    'content': str(content),
+                    'raw_data': str(content)
+                }
         except Exception as e:
             print(f"Error extracting tender data: {e}")
             return {
-                'content': str(content),
-                'source': source
+                'title': f"Tender from {source}",
+                'description': str(content)[:2000] if hasattr(content, '__str__') else f"Error extracting content from {source}",
+                'source': source,
+                'content': str(content) if hasattr(content, '__str__') else f"Error extracting content from {source}",
+                'raw_data': str(content) if hasattr(content, '__str__') else f"Error extracting content from {source}"
             }
 
     def _xml_to_dict(self, element):
