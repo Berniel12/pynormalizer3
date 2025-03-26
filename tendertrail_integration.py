@@ -1093,10 +1093,10 @@ class TenderTrailIntegration:
                 source = source_context
             
             # If source is numeric or '100', use the source context
-            if source.isdigit() or source == '100':
+            if source == '100' or (source.isdigit() and int(source) == 100):
                 if source_context:
                     source = source_context
-                elif isinstance(tender, dict) and 'source' in tender and tender['source'] not in ['100', 100]:
+                elif isinstance(tender, dict) and 'source' in tender and str(tender['source']) not in ['100', '']:
                     source = tender['source']
             
             # Store original tender for metadata
