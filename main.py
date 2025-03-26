@@ -39,12 +39,8 @@ async def main():
         normalizer = TenderNormalizer(provider, cache_dir)
         preprocessor = TenderPreprocessor()
         
-        # Initialize integration with the new constructor that doesn't take parameters
-        integration = TenderTrailIntegration()
-        
-        # Set normalizer and preprocessor as attributes
-        integration.normalizer = normalizer
-        integration.preprocessor = preprocessor
+        # Initialize TenderTrailIntegration with required parameters
+        integration = TenderTrailIntegration(normalizer, preprocessor, supabase_url, supabase_key)
         
         # Process tenders
         all_results = []
