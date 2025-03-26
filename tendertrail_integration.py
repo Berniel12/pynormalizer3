@@ -1074,15 +1074,18 @@ class TenderTrailIntegration:
             
             # Convert source to string and extract actual source name
             source = str(source)
-            # Map numeric source to actual source name
-            if source.isdigit():
-                # Get the actual source name from the current context
-                source_context = getattr(self, '_current_source', None)
+            
+            # Get the actual source name from the current context
+            source_context = getattr(self, '_current_source', None)
+            if source_context:
+                source = source_context
+            
+            # If source is numeric or '100', use the source context
+            if source.isdigit() or source == '100':
                 if source_context:
                     source = source_context
-                elif isinstance(tender, dict):
-                    # Try to get source from tender data
-                    source = tender.get('source', source_context or source)
+                elif isinstance(tender, dict) and 'source' in tender and tender['source'] not in ['100', 100]:
+                    source = tender['source']
             
             # Store original tender for metadata
             original_tender = tender
@@ -1091,8 +1094,8 @@ class TenderTrailIntegration:
             # Extract raw data if available
             if isinstance(tender, dict):
                 raw_data = tender.get('raw_data', tender.get('data', None))
-                # If source is in the tender dict, use it
-                if 'source' in tender and tender['source'] != '100':
+                # If source is in the tender dict and not '100', use it
+                if 'source' in tender and str(tender['source']) not in ['100', '']:
                     source = tender['source']
             elif isinstance(tender, str):
                 raw_data = tender
@@ -1104,8 +1107,8 @@ class TenderTrailIntegration:
                     parsed_tender = json.loads(tender)
                     if isinstance(parsed_tender, dict):
                         tender = parsed_tender
-                        # Update source if available in parsed data
-                        if 'source' in tender and tender['source'] != '100':
+                        # Update source if available in parsed data and not '100'
+                        if 'source' in tender and str(tender['source']) not in ['100', '']:
                             source = tender['source']
                     else:
                         # If it parsed but not into a dict, try to extract meaningful content
