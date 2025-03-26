@@ -1305,9 +1305,245 @@ class TenderTrailIntegration:
                 self._insert_error(str(source_name), "normalization_error", error_message, str(tender) if tender else "")
             return None
 
+    def _extract_field(self, data: Dict[str, Any], field_names: List[str]) -> Any:
+        """
+        Extract a field from a dictionary by trying different possible field names.
+        
+        Args:
+            data: The dictionary to extract the field from
+            field_names: List of possible field names to try
+            
+        Returns:
+            The value of the field if found, None otherwise
+        """
+        if not isinstance(data, dict):
+            return None
+            
+        # Try each field name
+        for field in field_names:
+            if field in data and data[field] is not None:
+                return data[field]
+                
+        # Check for nested dictionaries using dot notation (e.g., "metadata.field")
+        for field in field_names:
+            if "." in field:
+                parts = field.split(".")
+                current = data
+                found = True
+                
+                for part in parts:
+                    if isinstance(current, dict) and part in current:
+                        current = current[part]
+                    else:
+                        found = False
+                        break
+                        
+                if found:
+                    return current
+                    
+        # Try case-insensitive matching
+        lower_data = {k.lower(): v for k, v in data.items()}
+        for field in field_names:
+            if field.lower() in lower_data:
+                return lower_data[field.lower()]
+                
+        return None
+    
+    def _clean_html(self, html_content: str) -> str:
+        """
+        Clean HTML content by removing tags and entities.
+        
+        Args:
+            html_content: HTML content to clean
+            
+        Returns:
+            Cleaned text
+        """
+        if not html_content:
+            return ""
+            
+        # Remove HTML tags
+        text = re.sub(r'<[^>]+>', ' ', html_content)
+        
+        # Replace HTML entities
+        text = text.replace('&nbsp;', ' ')
+        text = text.replace('&amp;', '&')
+        text = text.replace('&lt;', '<')
+        text = text.replace('&gt;', '>')
+        text = text.replace('&quot;', '"')
+        text = text.replace('&#39;', "'")
+        
+        # Replace multiple spaces with a single space
+        text = re.sub(r'\s+', ' ', text)
+        
+        # Trim whitespace
+        text = text.strip()
+        
+        return text
+    
+    def _format_date(self, date_str: Optional[str]) -> Optional[str]:
+        """
+        Format a date string to ISO format.
+        
+        Args:
+            date_str: Date string to format
+            
+        Returns:
+            Formatted date string or None if invalid
+        """
+        if not date_str:
+            return None
+            
+        try:
+            # Try to parse with dateutil
+            from dateutil import parser
+            date_obj = parser.parse(date_str)
+            return date_obj.strftime('%Y-%m-%d')
+        except:
+            try:
+                # Try a manual approach for common formats
+                
+                # Remove time part if present
+                if ' ' in date_str:
+                    date_part = date_str.split(' ')[0]
+                elif 'T' in date_str:
+                    date_part = date_str.split('T')[0]
+                else:
+                    date_part = date_str
+                
+                # Check if it's already in ISO format
+                if re.match(r'^\d{4}-\d{2}-\d{2}$', date_part):
+                    return date_part
+                
+                # Check MM/DD/YYYY
+                if re.match(r'^\d{1,2}/\d{1,2}/\d{4}$', date_part):
+                    parts = date_part.split('/')
+                    return f"{parts[2]}-{parts[0].zfill(2)}-{parts[1].zfill(2)}"
+                
+                # Check DD/MM/YYYY
+                if re.match(r'^\d{1,2}/\d{1,2}/\d{4}$', date_part):
+                    parts = date_part.split('/')
+                    return f"{parts[2]}-{parts[1].zfill(2)}-{parts[0].zfill(2)}"
+                
+                # Return as is if we can't parse it
+                return date_str
+            except:
+                return date_str
+    
+    def _standardize_country(self, country_str: Optional[str]) -> str:
+        """
+        Standardize country names and codes.
+        
+        Args:
+            country_str: Country name or code
+            
+        Returns:
+            Standardized country name
+        """
+        if not country_str:
+            return ""
+            
+        # Convert to string and lowercase for comparison
+        country = str(country_str).strip().lower()
+        
+        # Country code mappings
+        country_map = {
+            # ISO codes to country names
+            'us': 'United States',
+            'usa': 'United States',
+            'united states of america': 'United States',
+            'uk': 'United Kingdom',
+            'gb': 'United Kingdom',
+            'great britain': 'United Kingdom',
+            'ca': 'Canada',
+            'au': 'Australia',
+            'de': 'Germany',
+            'fr': 'France',
+            'jp': 'Japan',
+            'it': 'Italy',
+            'cn': 'China',
+            'in': 'India',
+            'br': 'Brazil',
+            'ru': 'Russia',
+            'za': 'South Africa',
+            'sg': 'Singapore',
+            'ae': 'United Arab Emirates',
+            'uae': 'United Arab Emirates',
+            'kr': 'South Korea',
+            'south korea': 'South Korea',
+            'republic of korea': 'South Korea',
+            
+            # Common name variations
+            'united states': 'United States',
+            'united kingdom': 'United Kingdom',
+            'england': 'United Kingdom',
+            'u.s.': 'United States',
+            'u.s.a.': 'United States',
+            'u.k.': 'United Kingdom',
+            'deutschland': 'Germany',
+            'italia': 'Italy',
+            'brasil': 'Brazil',
+        }
+        
+        # Return the standardized country name if found
+        return country_map.get(country, country_str)
+    
+    def _extract_numeric(self, value: Any) -> Optional[float]:
+        """
+        Extract a numeric value from a string or dictionary.
+        
+        Args:
+            value: Value to extract numeric from
+            
+        Returns:
+            Numeric value or None if extraction fails
+        """
+        if value is None:
+            return None
+            
+        # Already a number
+        if isinstance(value, (int, float)):
+            return float(value)
+            
+        # Handle dictionary input
+        if isinstance(value, dict):
+            # Try common keys for amount
+            for key in ["amount", "value", "price", "cost", "estimated"]:
+                if key in value and value[key]:
+                    try:
+                        # Try to convert to float
+                        return float(value[key])
+                    except:
+                        # If not a direct number, try to extract from string
+                        if isinstance(value[key], str):
+                            return self._extract_numeric(value[key])
+            return None
+            
+        # Handle string input
+        if isinstance(value, str):
+            # Remove currency symbols and other non-numeric characters
+            numeric_str = re.sub(r'[^\d.]', '', value.replace(',', '.'))
+            
+            # Try to extract the first number
+            numbers = re.findall(r'\d+(?:\.\d+)?', numeric_str)
+            if numbers:
+                try:
+                    return float(numbers[0])
+                except:
+                    return None
+                    
+        return None
+    
     def _extract_tender_data(self, content, source):
         """
-        Attempt to extract meaningful tender data from a string or non-dict content.
+        Extract tender data from the content.
+        
+        Args:
+            content: Content containing tender data
+            source: Name of the source
+            
+        Returns:
+            List of tender dictionaries
         """
         try:
             # Print some debug info to see what we're working with
