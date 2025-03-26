@@ -912,12 +912,11 @@ class TenderTrailIntegration:
                 "tender_type": tender.get("notice_type", ""),
                 "contact_information": f"{tender.get('contact_email', '')} {tender.get('contact_phone', '')}".strip(),
                 "keywords": "",  # Will be generated from description later if needed
-                "url": tender.get("url", ""),
                 "metadata": tender.get("metadata", "{}")
             }
             
             # Store non-matching fields in metadata
-            fields_for_metadata = ["categories", "bid_reference_no", "country", "contact_email", "contact_phone", "currency"]
+            fields_for_metadata = ["categories", "bid_reference_no", "country", "contact_email", "contact_phone", "currency", "url"]
             metadata_dict = {}
             
             # Parse existing metadata if it's a string
