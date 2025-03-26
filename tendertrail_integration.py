@@ -694,8 +694,11 @@ class TenderTrailIntegration:
             except Exception as e:
                 print(f"Error querying table {source_name}: {e}")
             
-            # No valid data found
+            # If we reach here, it means we couldn't find any valid tenders
+            # Instead of processing source name characters, return empty list
+            print(f"No valid tenders found for source {source_name}")
             return []
+            
         except Exception as e:
             print(f"Error getting raw tenders: {e}")
             return []
