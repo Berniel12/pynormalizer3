@@ -908,16 +908,16 @@ class TenderTrailIntegration:
                 "date_published": tender.get("date_published"),
                 "closing_date": tender.get("closing_date"),
                 "tender_value": tender.get("tender_value"),
+                "tender_currency": tender.get("currency", ""),  # Map currency to tender_currency
                 "tender_type": tender.get("notice_type", ""),
                 "contact_information": f"{tender.get('contact_email', '')} {tender.get('contact_phone', '')}".strip(),
                 "keywords": "",  # Will be generated from description later if needed
-                "currency": tender.get("currency", ""),
                 "url": tender.get("url", ""),
                 "metadata": tender.get("metadata", "{}")
             }
             
-            # Store categories and other non-matching fields in metadata
-            fields_for_metadata = ["categories", "bid_reference_no", "country", "contact_email", "contact_phone"]
+            # Store non-matching fields in metadata
+            fields_for_metadata = ["categories", "bid_reference_no", "country", "contact_email", "contact_phone", "currency"]
             metadata_dict = {}
             
             # Parse existing metadata if it's a string
