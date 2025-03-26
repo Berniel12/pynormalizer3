@@ -1085,15 +1085,15 @@ class TenderTrailIntegration:
                 return {}
             
             # Convert source to string and extract actual source name
-            source = str(source)
+            source = str(source)  # Convert to string first
             
             # Get the actual source name from the current context
             source_context = getattr(self, '_current_source', None)
             if source_context:
                 source = source_context
             
-            # If source is numeric or '100', use the source context
-            if source == '100' or (source.isdigit() and int(source) == 100):
+            # If source is '100', use the source context
+            if source == '100':
                 if source_context:
                     source = source_context
                 elif isinstance(tender, dict) and 'source' in tender and str(tender['source']) not in ['100', '']:
