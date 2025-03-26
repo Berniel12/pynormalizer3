@@ -874,7 +874,6 @@ class TenderTrailIntegration:
                     contact_email TEXT,
                     contact_phone TEXT,
                     url TEXT,
-                    bid_reference_no TEXT,
                     status TEXT DEFAULT 'active',
                     created_at TIMESTAMP DEFAULT NOW(),
                     updated_at TIMESTAMP DEFAULT NOW(),
@@ -916,9 +915,22 @@ class TenderTrailIntegration:
                 "contact_email": tender.get("contact_email", ""),
                 "contact_phone": tender.get("contact_phone", ""),
                 "url": tender.get("url", ""),
-                "bid_reference_no": tender.get("bid_reference_no", ""),
                 "metadata": tender.get("metadata", "{}")
             }
+            
+            # Ensure bid_reference_no is stored in metadata instead
+            if tender.get("bid_reference_no"):
+                if isinstance(record["metadata"], str):
+                    try:
+                        metadata_dict = json.loads(record["metadata"])
+                        metadata_dict["bid_reference_no"] = tender.get("bid_reference_no")
+                        record["metadata"] = json.dumps(metadata_dict)
+                    except:
+                        # If parsing fails, create new metadata JSON
+                        record["metadata"] = json.dumps({"bid_reference_no": tender.get("bid_reference_no")})
+                else:
+                    # If metadata is a dict already
+                    record["metadata"]["bid_reference_no"] = tender.get("bid_reference_no")
             
             # Translate title and description if needed and translation is available
             if translation_available and record["description"]:
