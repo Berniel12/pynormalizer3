@@ -1917,48 +1917,54 @@ class TenderTrailIntegration:
         title = str(tender.get("notice_title", "")).lower()
         ref_num = str(tender.get("notice_id", "")).lower()
         source = tender.get("source", "")
+        raw_id = str(tender.get("raw_id", "")).lower()
         
-        # Skip generic default titles when detecting duplicates
-        if title.startswith("untitled tender from") or "untitled" in title:
-            print(f"Skipping duplicate detection on generic title: '{title}'")
-            # Only use reference numbers for generic titles, not the title itself
-            
-        # Check for exact reference number match
-        for existing in normalized_tenders:
-            # Convert existing reference to string before lowercasing
-            existing_ref = str(existing.get("notice_id", "")).lower()
-            
-            # Same reference number and source is a duplicate
-            if ref_num and existing_ref and ref_num == existing_ref and source == existing.get("source", ""):
-                print(f"Duplicate detected: identical reference number {ref_num}")
-                return True
-        
-        # Skip title-based duplicate detection for generic titles
-        if title.startswith("untitled tender from") or "untitled" in title:
+        # Skip duplicate detection for generic titles
+        if title.startswith("tender from") or title.startswith("untitled tender from"):
+            # For generic titles, only check raw_id and notice_id
+            for existing in normalized_tenders:
+                existing_ref = str(existing.get("notice_id", "")).lower()
+                existing_raw_id = str(existing.get("raw_id", "")).lower()
+                
+                # If we have matching IDs and source, it's a duplicate
+                if source == existing.get("source", "") and (
+                    (raw_id and existing_raw_id and raw_id == existing_raw_id) or
+                    (ref_num and existing_ref and ref_num == existing_ref)
+                ):
+                    print(f"Duplicate detected: matching ID for source {source}")
+                    return True
             return False
-            
-        # Check for title matches (only for non-generic titles)
+        
+        # For non-generic titles, check for duplicates
         for existing in normalized_tenders:
-            # Convert existing title to string before lowercasing 
+            # First check IDs
+            existing_ref = str(existing.get("notice_id", "")).lower()
+            existing_raw_id = str(existing.get("raw_id", "")).lower()
+            
+            # If we have matching IDs and source, it's a duplicate
+            if source == existing.get("source", "") and (
+                (raw_id and existing_raw_id and raw_id == existing_raw_id) or
+                (ref_num and existing_ref and ref_num == existing_ref)
+            ):
+                print(f"Duplicate detected: matching ID for source {source}")
+                return True
+            
+            # Then check title similarity
             existing_title = str(existing.get("notice_title", "")).lower()
             
-            # Skip comparing with generic titles
-            if existing_title.startswith("untitled tender from") or "untitled" in existing_title:
+            # Skip title comparison if either title is generic
+            if (existing_title.startswith("tender from") or 
+                existing_title.startswith("untitled tender from")):
                 continue
-                
-            # Exact title match could be a duplicate
-            if title and existing_title and title == existing_title:
+            
+            # Check for exact title match
+            if title == existing_title and source == existing.get("source", ""):
                 print(f"Duplicate detected: identical title '{title[:50]}...'")
                 return True
-                
-            # Check if one title contains the other (substring match)
-            if title and existing_title and (title in existing_title or existing_title in title):
-                print(f"Duplicate detected: title substring match '{title[:30]}...' and '{existing_title[:30]}...'")
-                return True
-                
-            # Check word-based similarity
-            if title and existing_title and len(title) > 10 and len(existing_title) > 10:
-                # Simple word overlap calculation
+            
+            # For title similarity checks, require additional matching fields
+            if len(title) > 10 and len(existing_title) > 10:
+                # Calculate word-based similarity
                 title_words = set(title.split())
                 existing_words = set(existing_title.split())
                 common_words = title_words.intersection(existing_words)
@@ -1967,10 +1973,40 @@ class TenderTrailIntegration:
                 if len(title_words) > 0 and len(existing_words) > 0:
                     similarity = len(common_words) / len(title_words.union(existing_words))
                     
-                    # High similarity threshold
+                    # For high title similarity, require additional matching fields
                     if similarity > 0.8:
-                        print(f"Duplicate detected: high title similarity ({similarity:.2f}) '{title[:30]}...'")
-                        return True
+                        # Check if other fields match
+                        matching_fields = 0
+                        fields_to_check = [
+                            ("description", 0.7),  # description with lower similarity threshold
+                            ("issuing_authority", 1.0),  # exact match for authority
+                            ("location", 1.0),  # exact match for location
+                            ("tender_value", 1.0),  # exact match for value
+                            ("closing_date", 1.0)  # exact match for date
+                        ]
+                        
+                        for field, required_similarity in fields_to_check:
+                            tender_value = str(tender.get(field, "")).lower()
+                            existing_value = str(existing.get(field, "")).lower()
+                            
+                            if tender_value and existing_value:
+                                if required_similarity == 1.0:
+                                    # Exact match required
+                                    if tender_value == existing_value:
+                                        matching_fields += 1
+                                else:
+                                    # Calculate similarity for text fields
+                                    field_words = set(tender_value.split())
+                                    existing_field_words = set(existing_value.split())
+                                    if field_words and existing_field_words:
+                                        field_similarity = len(field_words.intersection(existing_field_words)) / len(field_words.union(existing_field_words))
+                                        if field_similarity >= required_similarity:
+                                            matching_fields += 1
+                        
+                        # Require at least 2 additional matching fields for high title similarity
+                        if matching_fields >= 2:
+                            print(f"Duplicate detected: high similarity ({similarity:.2f}) with matching fields")
+                            return True
         
         return False
 
