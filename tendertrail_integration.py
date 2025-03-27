@@ -1605,8 +1605,10 @@ class TenderTrailIntegration:
                 "sam_gov": ["us government", "federal"]
             }
             
-            if source_name.lower() in source_category_map:
-                for category in source_category_map[source_name.lower()]:
+            # Convert source_name to string before calling lower()
+            source_name_str = str(source_name).lower()
+            if source_name_str in source_category_map:
+                for category in source_category_map[source_name_str]:
                     extracted_categories.add(category)
         
         return list(extracted_categories)
