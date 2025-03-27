@@ -1709,16 +1709,16 @@ class TenderTrailIntegration:
         
         return list(extracted_categories)
     
-    def _extract_tender_data(self, content, source):
+    def _extract_structured_data(self, content, source):
         """
-        Extract tender data from the content.
+        Extract structured data from various content formats.
         
         Args:
-            content: Content containing tender data
-            source: Name of the source
+            content: Content to extract data from
+            source: Source name for context
             
         Returns:
-            List of tender dictionaries
+            Dictionary of structured data
         """
         try:
             # Print some debug info to see what we're working with
@@ -1736,7 +1736,7 @@ class TenderTrailIntegration:
                         if response and response.data and len(response.data) > 0:
                             print(f"Found tender by ID {content}")
                             return {**response.data[0], 'source': source}
-        except Exception as e:
+                    except Exception as e:
                         print(f"Failed to fetch tender by ID: {e}")
                 
                 # Try to identify XML
