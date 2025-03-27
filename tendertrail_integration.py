@@ -10,7 +10,7 @@ import re
 class TenderTrailIntegration:
     """Integration layer for TenderTrail normalization workflow."""
     
-    def __init__(self, normalizer, preprocessor, supabase_url, supabase_key, skip_direct_connections=False):
+    def __init__(self, normalizer=None, preprocessor=None, supabase_url=None, supabase_key=None, skip_direct_connections=False):
         """
         Initialize the TenderTrail integration.
         
@@ -21,31 +21,25 @@ class TenderTrailIntegration:
             supabase_key: API key for the Supabase project
             skip_direct_connections: Whether to skip direct PostgreSQL connections (default: False)
         """
-        try:
         self.normalizer = normalizer
         self.preprocessor = preprocessor
-            self.supabase_url = supabase_url
-            self.supabase_key = supabase_key
-            self.skip_direct_connections = skip_direct_connections
-            
-            # Initialize Supabase client
-            try:
-                self.supabase: Client = create_client(supabase_url, supabase_key)
-                print("Successfully initialized Supabase client")
-            except Exception as e:
-                print(f"Error initializing Supabase client: {e}")
-                raise ValueError(f"Failed to initialize Supabase client: {e}")
-            
-            # Initialize translation cache
-            self.translation_cache = {}
-            
-            # Initialize schema cache
-            self.target_schema = None
-            
+        self.supabase_url = supabase_url
+        self.supabase_key = supabase_key
+        self.skip_direct_connections = skip_direct_connections
+        
+        # Initialize Supabase client
+        try:
+            self.supabase: Client = create_client(supabase_url, supabase_key)
+            print("Successfully initialized Supabase client")
         except Exception as e:
-            print(f"Error in __init__: {e}")
-            traceback.print_exc()
-            raise ValueError(f"Failed to initialize TenderTrailIntegration: {e}")
+            print(f"Error initializing Supabase client: {e}")
+            raise ValueError(f"Failed to initialize Supabase client: {e}")
+        
+        # Initialize translation cache
+        self.translation_cache = {}
+        
+        # Initialize schema cache
+        self.target_schema = None
     
     def process_source(self, tenders_or_source, source_name_or_batch_size=None, create_tables=True):
         """
@@ -166,8 +160,8 @@ class TenderTrailIntegration:
                 print(f"Could not preview first tender: {preview_e}")
             
             return self.process_source(tenders, source_name)
-                
-            except Exception as e:
+        
+        except Exception as e:
             print(f"Error processing JSON data for source {source_name}: {e}")
             traceback.print_exc()
             return 0, 0
