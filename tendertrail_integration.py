@@ -1804,179 +1804,130 @@ class TenderTrailIntegration:
         return result
 
     def _detect_potential_duplicate(self, tender, normalized_tenders):
-        """Check if a tender might be a duplicate of already processed tenders."""
+        """
+        Detect if a tender is potentially a duplicate of an existing one.
+        
+        Args:
+            tender: The tender to check
+            normalized_tenders: List of existing normalized tenders
+            
+        Returns:
+            Boolean indicating if the tender is a potential duplicate
+        """
         if not tender or not normalized_tenders:
             return False
             
-        # Extract key fields for comparison
-        title = tender.get("notice_title", "").lower()
-        ref_num = tender.get("notice_id", "").lower()
+        # Extract key information for comparison
+        title = str(tender.get("notice_title", "")).lower()
+        ref_num = str(tender.get("notice_id", "")).lower()
+        source = tender.get("source", "")
         
-        # Skip short titles or reference numbers that are too generic
-        if len(title) < 10 or len(ref_num) < 3:
-            return False
-            
-        # Check for exact match by reference number
+        # Check for exact reference number match
         for existing in normalized_tenders:
-            existing_ref = existing.get("notice_id", "").lower()
-            if existing_ref and existing_ref == ref_num:
-                print(f"Potential duplicate detected by reference: {ref_num}")
+            # Convert existing reference to string before lowercasing
+            existing_ref = str(existing.get("notice_id", "")).lower()
+            
+            # Same reference number and source is a duplicate
+            if ref_num and existing_ref and ref_num == existing_ref and source == existing.get("source", ""):
+                print(f"Duplicate detected: identical reference number {ref_num}")
                 return True
-                
-        # Check for high similarity in titles
+        
+        # Check for title matches
         for existing in normalized_tenders:
-            existing_title = existing.get("notice_title", "").lower()
+            # Convert existing title to string before lowercasing 
+            existing_title = str(existing.get("notice_title", "")).lower()
             
-            # Skip comparison with short titles
-            if len(existing_title) < 10:
-                continue
-                
-            # Very simple similarity check - more sophisticated would use edit distance
-            # But this is efficient for a quick check
-            
-            # 1. Check for exact title match
-            if title == existing_title:
-                print(f"Potential duplicate detected by exact title: {title[:30]}...")
+            # Exact title match could be a duplicate
+            if title and existing_title and title == existing_title:
+                print(f"Duplicate detected: identical title '{title[:50]}...'")
                 return True
                 
-            # 2. Check if title is substring of existing or vice versa
-            if title in existing_title or existing_title in title:
-                print(f"Potential duplicate detected by title substring: {title[:30]}...")
+            # Check if one title contains the other (substring match)
+            if title and existing_title and (title in existing_title or existing_title in title):
+                print(f"Duplicate detected: title substring match '{title[:30]}...' and '{existing_title[:30]}...'")
                 return True
                 
-            # 3. Check for word overlap (if enough words match)
-            title_words = set(title.split())
-            existing_words = set(existing_title.split())
-            
-            if len(title_words) > 3 and len(existing_words) > 3:
+            # Check word-based similarity
+            if title and existing_title and len(title) > 10 and len(existing_title) > 10:
+                # Simple word overlap calculation
+                title_words = set(title.split())
+                existing_words = set(existing_title.split())
                 common_words = title_words.intersection(existing_words)
                 
-                # If more than 70% words match, likely a duplicate
-                if len(common_words) / min(len(title_words), len(existing_words)) > 0.7:
-                    print(f"Potential duplicate detected by word similarity: {title[:30]}...")
-                    return True
+                # Calculate Jaccard similarity
+                if len(title_words) > 0 and len(existing_words) > 0:
+                    similarity = len(common_words) / len(title_words.union(existing_words))
                     
+                    # High similarity threshold
+                    if similarity > 0.8:
+                        print(f"Duplicate detected: high title similarity ({similarity:.2f}) '{title[:30]}...'")
+                        return True
+        
         return False
 
     def _validate_normalized_tender(self, tender):
-        """Validate a normalized tender to ensure required fields are present."""
-        # Return None if tender is invalid
-        if not tender:
-            return None
+        """
+        Validate a normalized tender to ensure it meets quality standards.
+        
+        Args:
+            tender: The normalized tender to validate
             
-        # Required fields from previous version
+        Returns:
+            Tuple (is_valid, error_message)
+        """
+        if not tender:
+            return False, "Empty tender"
+            
+        # Check required fields
         required_fields = ["notice_id", "notice_title", "source"]
         
         for field in required_fields:
-            if field not in tender or tender[field] is None or tender[field] == "":
-                if field == "notice_id":
-                    tender[field] = str(uuid.uuid4())
-                elif field == "notice_title":
-                    tender[field] = f"Untitled Tender from {tender.get('source', 'Unknown')}"
-                elif field == "source":
-                    tender[field] = "Unknown"
-        
-        # Validate data types
-        if "notice_title" in tender and not isinstance(tender["notice_title"], str):
-            tender["notice_title"] = str(tender["notice_title"])
-        
-        if "description" in tender and not isinstance(tender["description"], str):
+            if field not in tender or not tender[field]:
+                return False, f"Missing required field: {field}"
+                
+            # For notice_id, ensure it's a string
+            if field == "notice_id":
+                tender["notice_id"] = str(tender["notice_id"])
+                
+        # Convert description to string if present
+        if "description" in tender:
             tender["description"] = str(tender["description"])
-        
-        if "cpvs" in tender and not isinstance(tender["cpvs"], list):
-            if isinstance(tender["cpvs"], str):
-                tender["cpvs"] = [tender["cpvs"]]
-            else:
-                tender["cpvs"] = []
-        
-        if "tag" in tender and not isinstance(tender["tag"], list):
-            if isinstance(tender["tag"], str):
-                tender["tag"] = [tender["tag"]]
-            else:
-                tender["tag"] = []
-        
-        # Validate dates
-        if "date_published" in tender and tender["date_published"]:
-            if not self._is_valid_date_format(tender["date_published"]):
-                tender["date_published"] = None
-        
-        if "closing_date" in tender and tender["closing_date"]:
-            if not self._is_valid_date_format(tender["closing_date"]):
-                tender["closing_date"] = None
-        
-        # Enhanced validation for data quality
-        
-        # Ensure description is clean and not just an error message
-        description = tender.get("description", "")
-        if description:
-            # Check if description is too short to be useful
-            if len(description.strip()) < 20:
-                print(f"Warning: Description too short ({len(description)} chars), might not be useful")
                 
-            # Check if description is likely an error message
-            error_indicators = ["error", "not found", "404", "403", "access denied", 
-                               "forbidden", "unavailable", "sorry", "cannot access"]
+        # Check for error messages in description
+        if "description" in tender and isinstance(tender["description"], str):
+            description = tender["description"]
             
-            if any(indicator in description.lower() for indicator in error_indicators) and len(description) < 200:
-                print(f"Warning: Description appears to be an error message: {description[:100]}...")
-                # Don't reject, but mark in metadata
-                if not isinstance(tender.get("metadata"), dict):
-                    tender["metadata"] = {}
-                tender["metadata"]["possible_error"] = True
-                
-        # Ensure country is properly formatted 
-        if tender.get("country") and isinstance(tender["country"], str):
-            tender["country"] = self._standardize_country(tender["country"])
+            # Check for common error indicators
+            error_indicators = [
+                "access denied", "not found", "error", "invalid", 
+                "permission denied", "no results", "couldn't find",
+                "no tender", "page not found", "404", "403"
+            ]
             
-        # Validate and clean URLs
-        if tender.get("url") and isinstance(tender["url"], str):
-            url = tender["url"].strip()
-            
-            # Add http:// prefix if missing
-            if not (url.startswith("http://") or url.startswith("https://")):
-                url = "http://" + url
+            if any(indicator in str(description).lower() for indicator in error_indicators) and len(description) < 200:
+                return False, f"Description contains error message: {description[:100]}..."
                 
-            # Simple URL validation
-            if re.match(r'^https?://[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)+(:[0-9]+)?(/.*)?$', url):
-                tender["url"] = url
-            else:
-                # URL doesn't look valid, save to metadata
-                if not isinstance(tender.get("metadata"), dict):
-                    tender["metadata"] = {}
-                tender["metadata"]["original_url"] = url
-                tender["url"] = None
-                
-        # Fix lists that should be strings
-        for field in ["contact_email", "contact_phone", "issuing_authority"]:
-            if isinstance(tender.get(field), list):
-                if tender[field]:
-                    # Join list items with commas
-                    tender[field] = ", ".join(str(item) for item in tender[field] if item)
+        # Validate URL if present
+        if "url" in tender and tender["url"]:
+            url = str(tender["url"])
+            if not url.startswith(("http://", "https://")):
+                # Try to fix invalid URLs
+                if url.startswith("www."):
+                    tender["url"] = "https://" + url
                 else:
-                    tender[field] = None
+                    return False, f"Invalid URL format: {url}"
                     
-        # Make sure currency is standardized
-        if tender.get("currency") and isinstance(tender["currency"], str):
-            # Normalize currency code
-            curr = tender["currency"].strip().upper()
-            # Map common variants
-            currency_map = {
-                "US$": "USD", "USD$": "USD", "$": "USD", "DOLLAR": "USD", "DOLLARS": "USD",
-                "€": "EUR", "EURO": "EUR", "EUROS": "EUR",
-                "£": "GBP", "UKP": "GBP", "POUND": "GBP", "POUNDS": "GBP",
-                "¥": "JPY", "YEN": "JPY",
-                "₹": "INR", "RUPEE": "INR", "RUPEES": "INR"
-            }
-            tender["currency"] = currency_map.get(curr, curr)
-            
-        # Ensure tender value is numeric
-        if tender.get("tender_value") and not isinstance(tender["tender_value"], (int, float)):
+        # Validate tender_value if present
+        if "tender_value" in tender and tender["tender_value"]:
+            value = tender["tender_value"]
             try:
-                tender["tender_value"] = float(tender["tender_value"])
+                # Ensure it's a valid number
+                tender["tender_value"] = float(value)
             except (ValueError, TypeError):
-                tender["tender_value"] = None
+                return False, f"Invalid tender value: {value}"
                 
-        return tender
+        # If we get here, the tender passed validation
+        return True, "Validation passed"
 
     def _create_exec_sql_function(self):
         """Attempt to create the exec_sql function if it doesn't exist."""
@@ -2357,20 +2308,21 @@ class TenderTrailIntegration:
                     continue
                     
                 # Validate and clean the tender data
-                validated_tender = self._validate_normalized_tender(normalized_tender)
+                is_valid, validation_message = self._validate_normalized_tender(normalized_tender)
                 
-                if validated_tender:
+                if is_valid:
                     # Extract address info if available
-                    if 'description' in validated_tender and validated_tender['description']:
-                        address_info = self._extract_address_information(validated_tender['description'])
+                    if 'description' in normalized_tender and normalized_tender['description']:
+                        address_info = self._extract_address_information(normalized_tender['description'])
                         if address_info:
                             # Add to metadata
-                            if not isinstance(validated_tender.get('metadata'), dict):
-                                validated_tender['metadata'] = {}
-                            validated_tender['metadata']['address_info'] = address_info
+                            if not isinstance(normalized_tender.get('metadata'), dict):
+                                normalized_tender['metadata'] = {}
+                            normalized_tender['metadata']['address_info'] = address_info
                     
-                    processed_tenders.append(validated_tender)
+                    processed_tenders.append(normalized_tender)
                 else:
+                    print(f"Validation failed: {validation_message}")
                     skipped_tenders += 1
                     
             except Exception as e:
