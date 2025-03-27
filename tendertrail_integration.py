@@ -1021,6 +1021,91 @@ class TenderTrailIntegration:
             "language": "en"
         }
     
+    def _generate_meaningful_title(self, tender, source_name):
+        """
+        Generate a meaningful title for a tender when no title is found.
+        
+        Args:
+            tender: The tender data
+            source_name: Name of the source
+            
+        Returns:
+            A meaningful title based on available information
+        """
+        # Try to extract information for the title
+        description = self._extract_field(tender, ["description", "summary", "details", "body", "content", "text"])
+        authority = self._extract_field(tender, ["issuing_authority", "authority", "agency", "organization", "buyer", "department"])
+        location = self._extract_field(tender, ["location", "country", "place", "city", "region"])
+        notice_type = self._extract_field(tender, ["notice_type", "type", "category", "procurement_type"])
+        ref_id = self._extract_field(tender, ["id", "reference", "notice_id", "ref_no"])
+        date = self._extract_field(tender, ["date_published", "published_date", "publication_date", "date"])
+        
+        title_parts = []
+        
+        # Add notice type if available
+        if notice_type:
+            # Try to make notice type more readable
+            notice_type_str = str(notice_type).strip()
+            # Convert camelCase or snake_case to Title Case
+            notice_type_str = re.sub(r'([a-z])([A-Z])', r'\1 \2', notice_type_str)
+            notice_type_str = notice_type_str.replace('_', ' ').title()
+            title_parts.append(notice_type_str)
+        
+        # Add from authority if available
+        if authority:
+            authority_str = str(authority).strip()
+            if len(authority_str) > 50:
+                authority_str = authority_str[:47] + "..."
+            title_parts.append(f"from {authority_str}")
+        
+        # Add location if available
+        if location:
+            location_str = str(location).strip()
+            title_parts.append(f"in {location_str}")
+        
+        # Add reference ID if available
+        if ref_id:
+            ref_str = str(ref_id).strip()
+            if len(ref_str) < 50:  # Only include if not too long
+                title_parts.append(f"(Ref: {ref_str})")
+        
+        # Use description if available
+        if description:
+            desc_str = self._clean_html(str(description)).strip()
+            # Use first 60 characters of description if available
+            if desc_str and len(desc_str) > 5:
+                if len(desc_str) > 60:
+                    desc_str = desc_str[:57] + "..."
+                
+                # If we have other parts, make description shorter
+                if title_parts and len(desc_str) > 30:
+                    desc_str = desc_str[:27] + "..."
+                
+                # Put description at the beginning
+                title_parts.insert(0, desc_str)
+        
+        # Create title from parts
+        if title_parts:
+            title = " ".join(title_parts)
+            
+            # Ensure title isn't too long
+            if len(title) > 200:
+                title = title[:197] + "..."
+                
+            return title
+        
+        # If no meaningful information, use source name and date
+        date_str = ""
+        if date:
+            try:
+                formatted_date = self._format_date(date)
+                if formatted_date:
+                    date_str = f" ({formatted_date})"
+            except:
+                pass
+                
+        return f"Tender from {source_name}{date_str}"
+    
     def _normalize_tender(self, tender, source_name=None):
         """Normalize a tender to the target schema."""
         if not tender:
@@ -1046,12 +1131,16 @@ class TenderTrailIntegration:
             # Try to extract content from known source formats or fall back to generic extraction
             if source_name == "sam_gov":
                 # SAM.gov specific extraction
-                normalized["notice_title"] = self._extract_field(tender, ["subject", "title", "solicitationTitle"]) or f"Untitled {source_name} Tender"
+                normalized["notice_title"] = self._extract_field(tender, ["subject", "title", "solicitationTitle"])
                 normalized["description"] = self._clean_html(self._extract_field(tender, ["description", "body", "generalDescription"]) or "")
                 normalized["notice_type"] = self._extract_field(tender, ["type", "noticeType", "solicitationType"]) or "Default"
                 normalized["issuing_authority"] = self._extract_field(tender, ["office", "contractingOffice", "department", "agency"]) or "Unknown"
                 normalized["date_published"] = self._format_date(self._extract_field(tender, ["postedDate", "publishDate", "date", "datePosted"]))
                 normalized["closing_date"] = self._format_date(self._extract_field(tender, ["responseDeadLine", "closeDate", "deadlineDate", "responseDate"]))
+                
+                # If no title was found, generate a meaningful one
+                if not normalized["notice_title"]:
+                    normalized["notice_title"] = self._generate_meaningful_title(tender, source_name)
                 
                 # Extract place of performance for sam.gov
                 place_of_performance = self._extract_field(tender, ["placeOfPerformance", "pop", "performanceLocation"])
@@ -1092,7 +1181,7 @@ class TenderTrailIntegration:
                 
             elif source_name == "ted_eu":
                 # European TED specific extraction
-                normalized["notice_title"] = self._extract_field(tender, ["title", "contractTitle", "name"]) or f"Untitled {source_name} Tender"
+                normalized["notice_title"] = self._extract_field(tender, ["title", "contractTitle", "name"])
                 normalized["description"] = self._clean_html(self._extract_field(tender, ["description", "shortDescription", "contractDescription"]) or "")
                 normalized["notice_type"] = self._extract_field(tender, ["procedureType", "contractType", "type"]) or "Default"
                 normalized["issuing_authority"] = self._extract_field(tender, ["contractingAuthority", "authority", "organization"]) or "Unknown"
@@ -1100,6 +1189,10 @@ class TenderTrailIntegration:
                 normalized["closing_date"] = self._format_date(self._extract_field(tender, ["submissionDeadline", "deadline", "closingDate"]))
                 normalized["country"] = self._standardize_country(self._extract_field(tender, ["country", "countryCode", "location"]) or "")
                 normalized["location"] = self._extract_field(tender, ["addressTown", "city", "place"]) or ""
+                
+                # If no title was found, generate a meaningful one
+                if not normalized["notice_title"]:
+                    normalized["notice_title"] = self._generate_meaningful_title(tender, source_name)
                 
                 # Extract additional TED specific information
                 enriched_metadata["cpv_codes"] = self._extract_field(tender, ["cpvCodes", "cpvs", "commonProcurementVocabulary"])
@@ -1118,7 +1211,7 @@ class TenderTrailIntegration:
                     
             elif source_name == "ungm":
                 # UNGM specific extraction
-                normalized["notice_title"] = self._extract_field(tender, ["title", "tenderTitle", "subject"]) or f"Untitled {source_name} Tender"
+                normalized["notice_title"] = self._extract_field(tender, ["title", "tenderTitle", "subject"])
                 normalized["description"] = self._clean_html(self._extract_field(tender, ["description", "summary", "details"]) or "")
                 normalized["notice_type"] = self._extract_field(tender, ["type", "category", "tenderType"]) or "Default"
                 normalized["issuing_authority"] = self._extract_field(tender, ["organization", "agency", "orgName"]) or "Unknown"
@@ -1127,6 +1220,10 @@ class TenderTrailIntegration:
                 normalized["country"] = self._standardize_country(self._extract_field(tender, ["country", "deliveryCountry", "location"]) or "")
                 normalized["location"] = self._extract_field(tender, ["city", "deliveryLocation", "place"]) or ""
                 
+                # If no title was found, generate a meaningful one
+                if not normalized["notice_title"]:
+                    normalized["notice_title"] = self._generate_meaningful_title(tender, source_name)
+                
                 # UNGM specific metadata
                 enriched_metadata["reference"] = self._extract_field(tender, ["reference", "noticeNumber", "refNo"])
                 enriched_metadata["un_organization"] = self._extract_field(tender, ["unOrganization", "unAgency", "unEntity"])
@@ -1134,7 +1231,7 @@ class TenderTrailIntegration:
             
             elif source_name == "wb" or source_name == "worldbank":
                 # World Bank specific extraction
-                normalized["notice_title"] = self._extract_field(tender, ["title", "projectTitle", "name"]) or f"Untitled {source_name} Tender"
+                normalized["notice_title"] = self._extract_field(tender, ["title", "projectTitle", "name"])
                 normalized["description"] = self._clean_html(self._extract_field(tender, ["description", "projectDescription", "summary"]) or "")
                 normalized["notice_type"] = self._extract_field(tender, ["procurementType", "contractType", "type"]) or "Default"
                 normalized["issuing_authority"] = self._extract_field(tender, ["borrower", "client", "agency"]) or "Unknown"
@@ -1142,6 +1239,10 @@ class TenderTrailIntegration:
                 normalized["closing_date"] = self._format_date(self._extract_field(tender, ["bidDeadline", "closingDate", "dueDate"]))
                 normalized["country"] = self._standardize_country(self._extract_field(tender, ["country", "region", "location"]) or "")
                 normalized["location"] = self._extract_field(tender, ["city", "implementingAgency", "place"]) or ""
+                
+                # If no title was found, generate a meaningful one
+                if not normalized["notice_title"]:
+                    normalized["notice_title"] = self._generate_meaningful_title(tender, source_name)
                 
                 # World Bank specific metadata
                 enriched_metadata["project_id"] = self._extract_field(tender, ["projectId", "projectNumber", "projId"])
@@ -1161,7 +1262,11 @@ class TenderTrailIntegration:
             # Generic extraction (fallback for all sources)
             if not normalized.get("notice_title"):
                 # Try common title fields
-                normalized["notice_title"] = self._extract_field(tender, ["title", "name", "subject", "summary", "projectTitle", "tenderTitle", "contract_title", "tender_name"]) or f"Untitled {source_name} Tender"
+                normalized["notice_title"] = self._extract_field(tender, ["title", "name", "subject", "summary", "projectTitle", "tenderTitle", "contract_title", "tender_name"])
+                
+                # If still no title, generate a meaningful one
+                if not normalized["notice_title"]:
+                    normalized["notice_title"] = self._generate_meaningful_title(tender, source_name)
                 
             if not normalized.get("description"):
                 # Try common description fields
