@@ -1534,6 +1534,83 @@ class TenderTrailIntegration:
                     
         return None
     
+    def _extract_categories(self, description: str, source_name: Optional[str] = None) -> List[str]:
+        """
+        Extract categories from a tender description.
+        
+        Args:
+            description: The tender description text
+            source_name: Optional source name for context
+            
+        Returns:
+            List of extracted categories
+        """
+        if not description:
+            return []
+            
+        # Convert to lowercase for better matching
+        text = description.lower()
+        
+        # Define category mappings with keywords
+        category_keywords = {
+            "construction": ["construction", "building", "infrastructure", "renovation", "civil works", 
+                            "architecture", "contractor", "structural", "demolition", "roads", "bridge"],
+            "consulting": ["consulting", "consultancy", "advisory", "advice", "expert", "expertise", 
+                          "guidance", "professional services", "technical assistance"],
+            "healthcare": ["health", "medical", "hospital", "clinic", "pharmaceutical", "medicine", 
+                          "doctor", "patient", "healthcare", "treatment", "therapy", "nurse"],
+            "it": ["it ", "information technology", "software", "hardware", "computer", "digital", 
+                  "website", "network", "programming", "app", "application", "database", "system integration"],
+            "education": ["education", "school", "university", "college", "training", "learning", 
+                         "teaching", "academic", "student", "professor", "curriculum", "course"],
+            "agriculture": ["agriculture", "farming", "crop", "livestock", "irrigation", "rural", 
+                           "agricultural", "farm", "harvest", "seed", "fertilizer"],
+            "energy": ["energy", "power", "electricity", "renewable", "solar", "wind", "hydro", 
+                      "nuclear", "gas", "oil", "petroleum", "utility"],
+            "transportation": ["transport", "logistics", "shipping", "freight", "cargo", "aviation", 
+                              "maritime", "rail", "train", "vehicle", "fleet", "port", "airport"],
+            "telecommunications": ["telecom", "telecommunication", "communication", "network", 
+                                  "broadband", "mobile", "phone", "wireless", "fiber", "satellite"],
+            "environment": ["environment", "environmental", "green", "sustainable", "ecology", 
+                           "waste management", "recycling", "conservation", "climate"],
+            "security": ["security", "defense", "military", "police", "surveillance", "protection", 
+                        "safety", "guard", "monitoring", "alarm", "cyber security"],
+            "finance": ["finance", "financial", "banking", "investment", "loan", "credit", 
+                       "accounting", "audit", "insurance", "economic", "fiscal"],
+            "water": ["water", "sanitation", "sewage", "drainage", "plumbing", "hydrological", 
+                     "irrigation", "hydraulic", "dam", "reservoir", "aquatic"],
+            "legal": ["legal", "law", "lawyer", "attorney", "judicial", "court", "compliance", 
+                     "regulation", "regulatory", "legislation", "statutory"]
+        }
+        
+        # Extract categories based on keyword matches
+        extracted_categories = set()
+        
+        for category, keywords in category_keywords.items():
+            for keyword in keywords:
+                if keyword in text:
+                    extracted_categories.add(category)
+                    break
+        
+        # Add source-specific categories
+        if source_name:
+            source_category_map = {
+                "wb": ["development", "world bank"],
+                "adb": ["development", "asian"],
+                "aiib": ["infrastructure", "asian"],
+                "afdb": ["development", "african"],
+                "iadb": ["development", "american"],
+                "ted_eu": ["european", "eu procurement"],
+                "ungm": ["united nations", "international organization"],
+                "sam_gov": ["us government", "federal"]
+            }
+            
+            if source_name.lower() in source_category_map:
+                for category in source_category_map[source_name.lower()]:
+                    extracted_categories.add(category)
+        
+        return list(extracted_categories)
+    
     def _extract_tender_data(self, content, source):
         """
         Extract tender data from the content.
