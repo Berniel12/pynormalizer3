@@ -11,30 +11,31 @@ import datetime
 class TenderTrailIntegration:
     """Integration layer for TenderTrail normalization workflow."""
     
-    def __init__(self, normalizer=None, preprocessor=None, supabase_url=None, supabase_key=None, skip_direct_connections=False):
+    def __init__(self, normalizer=None, preprocessor=None, supabase_url=None, supabase_key=None):
         """
-        Initialize the TenderTrail integration.
+        Initialize the integration layer.
         
         Args:
-            normalizer: The normalizer instance to use
-            preprocessor: The preprocessor instance to use
-            supabase_url: URL of the Supabase project
-            supabase_key: API key for the Supabase project
-            skip_direct_connections: Whether to skip direct PostgreSQL connections (default: False)
+            normalizer: The TenderNormalizer instance (LLM-based)
+            preprocessor: The TenderPreprocessor instance 
+            supabase_url: Supabase URL
+            supabase_key: Supabase API key
         """
         self.normalizer = normalizer
         self.preprocessor = preprocessor
-        self.supabase_url = supabase_url
-        self.supabase_key = supabase_key
-        self.skip_direct_connections = skip_direct_connections
         
         # Initialize Supabase client
-        try:
-            self.supabase: Client = create_client(supabase_url, supabase_key)
-            print("Successfully initialized Supabase client")
-        except Exception as e:
-            print(f"Error initializing Supabase client: {e}")
-            raise ValueError(f"Failed to initialize Supabase client: {e}")
+        if supabase_url and supabase_key:
+            try:
+                from supabase import create_client
+                self.supabase = create_client(supabase_url, supabase_key)
+                print("Successfully initialized Supabase client")
+            except ImportError:
+                print("Supabase client not found. Install with: pip install supabase")
+                raise
+            except Exception as e:
+                print(f"Error initializing Supabase client: {e}")
+                raise
         
         # Initialize translation cache
         self.translation_cache = {}
@@ -271,153 +272,237 @@ class TenderTrailIntegration:
         # Fall back to default
         return default_id
     
-    def _get_source_schema(self, source_name: str) -> Dict[str, Any]:
-        """Get source schema from database or config."""
+    def _get_source_schema(self, source_name):
+        """
+        Get the schema for a source. 
+        First tries to retrieve from database, then falls back to defaults.
+        
+        Args:
+            source_name: Name of the source
+            
+        Returns:
+            Dictionary representing the source schema
+        """
+        if not source_name:
+            return self._get_default_source_schema()
+            
         try:
-            response = self.supabase.table('source_schemas').select('*').eq('name', source_name).execute()
-            if response.data:
-                schema_data = response.data[0]['schema']
-                # Check if schema_data is already a dict (no need to parse)
-                if isinstance(schema_data, dict):
-                    return schema_data
-                # If it's a string, try to parse it
-                return json.loads(schema_data) if isinstance(schema_data, str) else schema_data
-            else:
-                # Fallback to default schema if not found in database
-                return self._get_default_source_schema(source_name)
+            # Try to get schema from database
+            response = self.supabase.table('source_schemas').select('schema').eq('name', source_name).execute()
+            if hasattr(response, 'data') and response.data and len(response.data) > 0:
+                schema = response.data[0].get('schema')
+                if schema:
+                    if isinstance(schema, str):
+                        return json.loads(schema)
+                    elif isinstance(schema, dict):
+                        return schema
         except Exception as e:
-            print(f"Error getting source schema: {e}")
-            return self._get_default_source_schema(source_name)
-    
-    def _get_default_source_schema(self, source_name: str) -> Dict[str, Any]:
-        """Get default schema for a source."""
-        # Basic default schemas for common sources
-        default_schemas = {
-            "adb": {
-                "source_name": "adb",
-                "notice_title": {"type": "string", "maps_to": "title"},
-                "description": {"type": "string", "maps_to": "description"},
-                "publication_date": {"type": "date", "maps_to": "date_published"},
-                "due_date": {"type": "date", "maps_to": "closing_date"},
-                "contract_amount": {"type": "monetary", "maps_to": "tender_value"},
-                "country": {"type": "string", "maps_to": "location"},
-                "contractor": {"type": "string", "maps_to": "issuing_authority"},
-                "language": "en"
-            },
-            "afd": {
-                "source_name": "afd",
-                "notice_title": {"type": "string", "maps_to": "title"},
-                "notice_content": {"type": "string", "maps_to": "description"},
-                "publication_date": {"type": "string", "maps_to": "date_published"},
-                "deadline": {"type": "string", "maps_to": "closing_date"},
-                "country": {"type": "string", "maps_to": "location"},
-                "agency": {"type": "string", "maps_to": "issuing_authority"},
-                "language": "fr"
-            },
-            "afdb": {
-                "source_name": "afdb",
-                "title": {"type": "string", "maps_to": "title"},
-                "description": {"type": "string", "maps_to": "description"},
-                "publication_date": {"type": "string", "maps_to": "date_published"},
-                "closing_date": {"type": "date", "maps_to": "closing_date"},
-                "estimated_value": {"type": "monetary", "maps_to": "tender_value"},
-                "country": {"type": "string", "maps_to": "location"},
-                "language": "en"
-            },
-            "aiib": {
-                "source_name": "aiib",
-                "project_notice": {"type": "string", "maps_to": "title"},
-                "pdf_content": {"type": "string", "maps_to": "description"},
-                "date": {"type": "string", "maps_to": "date_published"},
-                "member": {"type": "string", "maps_to": "location"},
-                "language": "en"
-            },
-            "iadb": {
-                "source_name": "iadb",
-                "notice_title": {"type": "string", "maps_to": "title"},
-                "url_pdf": {"type": "string", "maps_to": "document_url"},
-                "publication_date": {"type": "date", "maps_to": "date_published"},
-                "pue_date": {"type": "date", "maps_to": "closing_date"},
-                "country": {"type": "string", "maps_to": "location"},
-                "language": "en"
-            },
-            "sam_gov": {
-                "source_name": "sam_gov",
-                "opportunity_title": {"type": "string", "maps_to": "title"},
-                "description": {"type": "string", "maps_to": "description"},
-                "publish_date": {"type": "timestamp", "maps_to": "date_published"},
-                "response_date": {"type": "timestamp", "maps_to": "closing_date"},
-                "place_of_performance": {"type": "jsonb", "maps_to": "location"},
-                "language": "en"
-            },
-            "ted_eu": {
-                "source_name": "ted_eu",
-                "title": {"type": "string", "maps_to": "title"},
-                "summary": {"type": "string", "maps_to": "description"},
-                "publication_date": {"type": "date", "maps_to": "date_published"},
-                "deadline_date": {"type": "date", "maps_to": "closing_date"},
-                "organisation_name": {"type": "string", "maps_to": "issuing_authority"},
-                "language": "en"
-            },
-            "ungm": {
-                "source_name": "ungm",
-                "title": {"type": "string", "maps_to": "title"},
-                "description": {"type": "string", "maps_to": "description"},
-                "published_on": {"type": "string", "maps_to": "date_published"},
-                "deadline_on": {"type": "string", "maps_to": "closing_date"},
-                "beneficiary_countries": {"type": "string", "maps_to": "location"},
-                "language": "en"
-            },
-            "wb": {
-                "source_name": "wb",
-                "title": {"type": "string", "maps_to": "title"},
-                "description": {"type": "string", "maps_to": "description"},
-                "publication_date": {"type": "timestamp", "maps_to": "date_published"},
-                "deadline": {"type": "timestamp", "maps_to": "closing_date"},
-                "country": {"type": "string", "maps_to": "location"},
-                "contact_organization": {"type": "string", "maps_to": "issuing_authority"},
-                "language": "en"
-            }
+            print(f"Error retrieving source schema from database: {e}")
+            
+        # Fallback to defaults based on source name
+        print(f"Using default schema for source: {source_name}")
+        
+        # Common field mappings for default schema
+        common_mappings = {
+            "title": {"type": "string", "maps_to": "title"},
+            "description": {"type": "string", "maps_to": "description"},
+            "notice_title": {"type": "string", "maps_to": "title"},
+            "notice_id": {"type": "string", "maps_to": "raw_id"},
+            "source": {"type": "string", "maps_to": "source"},
+            "date_published": {"type": "date", "maps_to": "date_published"},
+            "closing_date": {"type": "date", "maps_to": "closing_date"},
+            "tender_value": {"type": "monetary", "maps_to": "tender_value"},
+            "currency": {"type": "string", "maps_to": "tender_currency"},
+            "country": {"type": "string", "maps_to": "location"},
+            "location": {"type": "string", "maps_to": "location"},
+            "issuing_authority": {"type": "string", "maps_to": "issuing_authority"},
+            "notice_type": {"type": "string", "maps_to": "tender_type"},
+            "organization": {"type": "string", "maps_to": "issuing_authority"}
         }
         
-        return default_schemas.get(source_name, {
-            "source_name": source_name,
-            "language": "en"
-        })
+        # Source-specific default schemas
+        if source_name == "adb":
+            schema = {
+                "source_name": "adb",
+                "fields": {
+                    "title": common_mappings["title"],
+                    "description": common_mappings["description"],
+                    "published_date": {"type": "date", "maps_to": "date_published"},
+                    "deadline": {"type": "date", "maps_to": "closing_date"},
+                    "budget": {"type": "monetary", "maps_to": "tender_value"},
+                    "location": common_mappings["location"],
+                    "authority": {"type": "string", "maps_to": "issuing_authority"}
+                },
+                "language": "en"
+            }
+        elif source_name == "wb" or source_name == "worldbank":
+            schema = {
+                "source_name": "wb",
+                "fields": {
+                    "title": common_mappings["title"],
+                    "description": common_mappings["description"],
+                    "publication_date": {"type": "date", "maps_to": "date_published"},
+                    "closing_date": {"type": "date", "maps_to": "closing_date"},
+                    "value": {"type": "monetary", "maps_to": "tender_value"},
+                    "country": {"type": "string", "maps_to": "location"},
+                    "borrower": {"type": "string", "maps_to": "issuing_authority"}
+                },
+                "language": "en"
+            }
+        elif source_name == "ungm":
+            schema = {
+                "source_name": "ungm",
+                "fields": {
+                    "title": common_mappings["title"],
+                    "description": common_mappings["description"],
+                    "published": {"type": "date", "maps_to": "date_published"},
+                    "deadline": {"type": "date", "maps_to": "closing_date"},
+                    "value": {"type": "monetary", "maps_to": "tender_value"},
+                    "country": {"type": "string", "maps_to": "location"},
+                    "agency": {"type": "string", "maps_to": "issuing_authority"}
+                },
+                "language": "en"
+            }
+        elif source_name == "ted_eu":
+            schema = {
+                "source_name": "ted_eu",
+                "fields": {
+                    "title": common_mappings["title"],
+                    "description": common_mappings["description"],
+                    "publicationDate": {"type": "date", "maps_to": "date_published"},
+                    "submissionDeadline": {"type": "date", "maps_to": "closing_date"},
+                    "estimatedValue": {"type": "monetary", "maps_to": "tender_value"},
+                    "country": {"type": "string", "maps_to": "location"},
+                    "contractingAuthority": {"type": "string", "maps_to": "issuing_authority"},
+                    "procedureType": {"type": "string", "maps_to": "tender_type"},
+                    "cpvCodes": {"type": "array", "maps_to": "keywords"}
+                },
+                "language": "en"
+            }
+        elif source_name == "sam_gov":
+            schema = {
+                "source_name": "sam_gov",
+                "fields": {
+                    "title": common_mappings["title"],
+                    "description": common_mappings["description"],
+                    "posted_date": {"type": "date", "maps_to": "date_published"},
+                    "response_deadline": {"type": "date", "maps_to": "closing_date"},
+                    "estimated_value": {"type": "monetary", "maps_to": "tender_value"},
+                    "place_of_performance": {"type": "string", "maps_to": "location"},
+                    "agency": {"type": "string", "maps_to": "issuing_authority"},
+                    "notice_type": {"type": "string", "maps_to": "tender_type"},
+                    "solicitation_number": {"type": "string", "maps_to": "raw_id"}
+                },
+                "language": "en"
+            }
+        else:
+            # Generic schema for any other source
+            schema = {
+                "source_name": source_name,
+                "fields": {
+                    "title": common_mappings["title"],
+                    "description": common_mappings["description"],
+                    "date_published": {"type": "date", "maps_to": "date_published"},
+                    "closing_date": {"type": "date", "maps_to": "closing_date"},
+                    "tender_value": {"type": "monetary", "maps_to": "tender_value"},
+                    "location": {"type": "string", "maps_to": "location"},
+                    "issuing_authority": {"type": "string", "maps_to": "issuing_authority"},
+                    "notice_type": {"type": "string", "maps_to": "tender_type"},
+                    "notice_id": {"type": "string", "maps_to": "raw_id"}
+                },
+                "language": "en"
+            }
+            
+        return schema
     
-    def _get_target_schema(self) -> Dict[str, Any]:
-        """Get target schema from database or config."""
+    def _get_target_schema(self):
+        """
+        Get the target schema for normalization.
+        First tries to retrieve from database, then falls back to defaults.
+        
+        Returns:
+            Dictionary representing the target schema
+        """
         try:
-            # Try to get from database, but don't error if not available
-            response = self.supabase.table('target_schema').select('*').execute()
-            if response.data:
-                schema_data = response.data[0]['schema']
-                # Check if schema_data is already a dict (no need to parse)
-                if isinstance(schema_data, dict):
-                    return schema_data
-                # If it's a string, try to parse it
-                return json.loads(schema_data) if isinstance(schema_data, str) else schema_data
-            else:
-                print("Target schema not found in database, creating it")
-                # Try to create the target schema table
-                try:
-                    self._create_target_schema_table()
-                    # Try to insert the default schema
-                    default_schema = self._get_default_target_schema()
-                    insert_data = {
-                        'schema': default_schema
-                    }
-                    self.supabase.table('target_schema').insert(insert_data).execute()
-                    print("Created target schema in database")
-                    return default_schema
-                except Exception as create_e:
-                    print(f"Failed to create target schema: {create_e}")
-                # Return default schema
-                return self._get_default_target_schema()
+            # Try to get schema from database
+            response = self.supabase.table('target_schema').select('schema').limit(1).execute()
+            if hasattr(response, 'data') and response.data and len(response.data) > 0:
+                schema = response.data[0].get('schema')
+                if schema:
+                    if isinstance(schema, str):
+                        return json.loads(schema)
+                    elif isinstance(schema, dict):
+                        return schema
         except Exception as e:
-            print(f"Error getting target schema from database: {e}")
-            # Try to create the target schema table
-            return self._get_default_target_schema()
+            print(f"Error retrieving target schema from database: {e}")
+            
+        # Fallback to default schema
+        print("Using default target schema")
+        return {
+            "title": {
+                "type": "string",
+                "description": "Title of the tender",
+                "format": "Title case, max 200 characters"
+            },
+            "description": {
+                "type": "string",
+                "description": "Detailed description of the tender",
+                "format": "Plain text, max 2000 characters",
+                "requires_translation": True
+            },
+            "date_published": {
+                "type": "string",
+                "description": "Date when the tender was published",
+                "format": "ISO 8601 (YYYY-MM-DD)"
+            },
+            "closing_date": {
+                "type": "string",
+                "description": "Deadline for tender submissions",
+                "format": "ISO 8601 (YYYY-MM-DD)"
+            },
+            "tender_value": {
+                "type": "string",
+                "description": "Estimated value of the tender",
+                "format": "Numeric value followed by currency code (e.g., 1000000 USD)"
+            },
+            "tender_currency": {
+                "type": "string",
+                "description": "Currency of the tender value",
+                "format": "ISO 4217 currency code (e.g., USD, EUR)",
+                "extract_from": {
+                    "field": "tender_value"
+                }
+            },
+            "location": {
+                "type": "string",
+                "description": "Location where the project will be implemented",
+                "format": "City, Country"
+            },
+            "issuing_authority": {
+                "type": "string",
+                "description": "Organization issuing the tender",
+                "format": "Official organization name"
+            },
+            "tender_type": {
+                "type": "string",
+                "description": "Type of tender",
+                "format": "One of: Goods, Works, Services, Consulting",
+                "extract_from": {
+                    "field": "description"
+                }
+            },
+            "raw_id": {
+                "type": "string",
+                "description": "Original ID from the source system",
+                "format": "As provided by source"
+            },
+            "source": {
+                "type": "string",
+                "description": "Source of the tender",
+                "format": "Short code for the source (e.g., adb, wb, ted_eu)"
+            },
+            "language": "en"
+        }
     
     def _create_target_schema_table(self) -> None:
         """Create target_schema table if it doesn't exist and insert default schema."""
@@ -2396,55 +2481,109 @@ class TenderTrailIntegration:
         cleaned_data = []
         for item in raw_data:
             try:
-                # First check if it's a string that needs to be parsed
-                if isinstance(item, str):
-                    try:
-                        parsed_item = json.loads(item)
-                        cleaned_data.append(parsed_item)
-                        continue
-                    except json.JSONDecodeError:
-                        # Not valid JSON, keep as is
-                        cleaned_data.append(item)
-                        continue
-                
-                # If it's a dict, use it directly
-                if isinstance(item, dict):
-                    cleaned_data.append(item)
+                # Skip empty items
+                if not item:
                     continue
                     
-                # If it has a 'data' field that contains the tender
-                if hasattr(item, 'get') and callable(item.get):
-                    try:
-                        data = item.get('data')
-                        if data is not None:
-                            if isinstance(data, str):
-                                try:
-                                    parsed_data = json.loads(data)
-                                    cleaned_data.append(parsed_data)
-                                    continue
-                                except:
-                                    # Not valid JSON, keep the string
-                                    cleaned_data.append(data)
-                                    continue
-                            else:
-                                cleaned_data.append(data)
-                                continue
-                    except:
-                        # Fallback if get fails
-                        pass
-                
-                # Add the item as-is
-                cleaned_data.append(item)
-                
+                # If it's just a string ID, try to extract structured data
+                if isinstance(item, str) and len(item.strip()) < 50:
+                    structured_data = self._extract_structured_data(item, source_name)
+                    if structured_data:
+                        cleaned_data.append(structured_data)
+                    else:
+                        print(f"Unable to extract structured data from string: {item}")
+                        continue
+                        
+                # If it's a dictionary, use it directly
+                elif isinstance(item, dict):
+                    # Clean HTML if present in description-like fields
+                    for field in ['description', 'body', 'content', 'text', 'details']:
+                        if field in item and item[field] and isinstance(item[field], str):
+                            item[field] = self._clean_html(item[field])
+                            
+                    # Make sure we have a source
+                    if 'source' not in item:
+                        item['source'] = source_name
+                        
+                    cleaned_data.append(item)
+                    
+                # For other types, try to convert to structured data
+                else:
+                    structured_data = self._extract_structured_data(item, source_name)
+                    if structured_data:
+                        cleaned_data.append(structured_data)
+                    else:
+                        print(f"Unable to extract structured data from item of type {type(item)}")
+                        continue
+                        
             except Exception as e:
-                print(f"Error pre-processing raw tender item: {e}")
+                print(f"Error cleaning tender: {e}")
                 error_tenders += 1
+                
+        # Get schemas
+        source_schema = self._get_source_schema(source_name)
+        target_schema = self._get_target_schema()
         
         # Second pass to normalize and validate
         for tender in cleaned_data:
             try:
-                # Normalize the tender
-                normalized_tender = self._normalize_tender(tender, source_name)
+                # Preprocess the tender using the preprocessor if available
+                preprocessed_tender = None
+                if hasattr(self, 'preprocessor') and self.preprocessor:
+                    try:
+                        preprocessed_tender = self.preprocessor.preprocess(tender)
+                        if preprocessed_tender:
+                            # Add source name if missing
+                            if 'source' not in preprocessed_tender:
+                                preprocessed_tender['source'] = source_name
+                    except Exception as preproc_e:
+                        print(f"Error during preprocessing: {preproc_e}")
+                        # Continue with original tender
+                        preprocessed_tender = None
+                
+                # Use the preprocessed tender if available, otherwise use the original
+                tender_to_normalize = preprocessed_tender if preprocessed_tender else tender
+                
+                # Try to use the LLM normalizer if available
+                normalized_tender = None
+                if hasattr(self, 'normalizer') and self.normalizer:
+                    try:
+                        normalized_tender = self.normalizer.normalize_tender(
+                            tender_to_normalize, 
+                            source_schema, 
+                            target_schema
+                        )
+                        
+                        # Ensure required fields from the integration perspective
+                        if normalized_tender:
+                            # Add source name if missing
+                            if 'source' not in normalized_tender:
+                                normalized_tender['source'] = source_name
+                                
+                            # Map field names to match our expected schema
+                            # (Since LLM might return fields like 'title' instead of 'notice_title')
+                            field_mapping = {
+                                'title': 'notice_title',
+                                'description': 'description',
+                                'date_published': 'date_published',
+                                'closing_date': 'closing_date',
+                                'tender_value': 'tender_value',
+                                'tender_currency': 'currency',
+                                'location': 'location',
+                                'issuing_authority': 'issuing_authority'
+                            }
+                            
+                            for llm_field, int_field in field_mapping.items():
+                                if llm_field in normalized_tender and int_field not in normalized_tender:
+                                    normalized_tender[int_field] = normalized_tender[llm_field]
+                    except Exception as llm_e:
+                        print(f"Error during LLM normalization: {llm_e}")
+                        normalized_tender = None
+                
+                # Fallback to rule-based normalization if LLM failed
+                if not normalized_tender:
+                    print("Falling back to rule-based normalization")
+                    normalized_tender = self._normalize_tender(tender_to_normalize, source_name)
                 
                 if not normalized_tender:
                     skipped_tenders += 1
@@ -2477,6 +2616,6 @@ class TenderTrailIntegration:
             except Exception as e:
                 print(f"Error during tender normalization: {e}")
                 error_tenders += 1
-        
+                
         print(f"Enhanced processing results: {len(processed_tenders)} valid tenders, {skipped_tenders} skipped, {error_tenders} errors")
         return processed_tenders
