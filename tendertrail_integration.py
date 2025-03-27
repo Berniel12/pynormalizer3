@@ -388,41 +388,34 @@ class TenderTrailIntegration:
         """Get target schema from database or config."""
         try:
             # Try to get from database, but don't error if not available
-        try:
             response = self.supabase.table('target_schema').select('*').execute()
             if response.data:
-                    schema_data = response.data[0]['schema']
-                    # Check if schema_data is already a dict (no need to parse)
-                    if isinstance(schema_data, dict):
-                        print("Retrieved target schema from database")
-                        return schema_data
-                    # If it's a string, try to parse it
-                    parsed_schema = json.loads(schema_data) if isinstance(schema_data, str) else schema_data
-                    print("Retrieved and parsed target schema from database")
-                    return parsed_schema
+                schema_data = response.data[0]['schema']
+                # Check if schema_data is already a dict (no need to parse)
+                if isinstance(schema_data, dict):
+                    return schema_data
+                # If it's a string, try to parse it
+                return json.loads(schema_data) if isinstance(schema_data, str) else schema_data
             else:
-                    print("No schema found in target_schema table, using default")
-                    # Try to create target schema table if empty
-                    try:
-                        self._create_target_schema_table()
-                    except Exception as create_e:
-                        print(f"Failed to create target schema: {create_e}")
-                    # Return default schema
+                print("Target schema not found in database, creating it")
+                # Try to create the target schema table
+                try:
+                    self._create_target_schema_table()
+                    # Try to insert the default schema
+                    default_schema = self._get_default_target_schema()
+                    insert_data = {
+                        'schema': default_schema
+                    }
+                    self.supabase.table('target_schema').insert(insert_data).execute()
+                    print("Created target schema in database")
+                    return default_schema
+                except Exception as create_e:
+                    print(f"Failed to create target schema: {create_e}")
+                # Return default schema
                 return self._get_default_target_schema()
         except Exception as e:
-                print(f"Error getting target schema from database: {e}")
-                # Try to create the target schema table
-                try: 
-                    self._create_target_schema_table()
-                except Exception as create_e:
-                    print(f"Failed to create target schema table: {create_e}")
-                
-                # Fall back to default schema
-                default_schema = self._get_default_target_schema()
-                print("Using default target schema")
-                return default_schema
-        except Exception as e:
-            print(f"General error in _get_target_schema: {e}")
+            print(f"Error getting target schema from database: {e}")
+            # Try to create the target schema table
             return self._get_default_target_schema()
     
     def _create_target_schema_table(self) -> None:
