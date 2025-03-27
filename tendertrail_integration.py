@@ -22,8 +22,8 @@ class TenderTrailIntegration:
             skip_direct_connections: Whether to skip direct PostgreSQL connections (default: False)
         """
         try:
-            self.normalizer = normalizer
-            self.preprocessor = preprocessor
+        self.normalizer = normalizer
+        self.preprocessor = preprocessor
             self.supabase_url = supabase_url
             self.supabase_key = supabase_key
             self.skip_direct_connections = skip_direct_connections
@@ -166,8 +166,8 @@ class TenderTrailIntegration:
                 print(f"Could not preview first tender: {preview_e}")
             
             return self.process_source(tenders, source_name)
-        
-        except Exception as e:
+                
+            except Exception as e:
             print(f"Error processing JSON data for source {source_name}: {e}")
             traceback.print_exc()
             return 0, 0
@@ -394,9 +394,9 @@ class TenderTrailIntegration:
         """Get target schema from database or config."""
         try:
             # Try to get from database, but don't error if not available
-            try:
-                response = self.supabase.table('target_schema').select('*').execute()
-                if response.data:
+        try:
+            response = self.supabase.table('target_schema').select('*').execute()
+            if response.data:
                     schema_data = response.data[0]['schema']
                     # Check if schema_data is already a dict (no need to parse)
                     if isinstance(schema_data, dict):
@@ -406,7 +406,7 @@ class TenderTrailIntegration:
                     parsed_schema = json.loads(schema_data) if isinstance(schema_data, str) else schema_data
                     print("Retrieved and parsed target schema from database")
                     return parsed_schema
-                else:
+            else:
                     print("No schema found in target_schema table, using default")
                     # Try to create target schema table if empty
                     try:
@@ -414,8 +414,8 @@ class TenderTrailIntegration:
                     except Exception as create_e:
                         print(f"Failed to create target schema: {create_e}")
                     # Return default schema
-                    return self._get_default_target_schema()
-            except Exception as e:
+                return self._get_default_target_schema()
+        except Exception as e:
                 print(f"Error getting target schema from database: {e}")
                 # Try to create the target schema table
                 try: 
@@ -1020,7 +1020,7 @@ class TenderTrailIntegration:
             },
             "language": "en"
         }
-
+    
     def _normalize_tender(self, tender, source_name=None):
         """Normalize a tender to the target schema."""
         if not tender:
@@ -1031,18 +1031,22 @@ class TenderTrailIntegration:
             if not source_name and hasattr(self, '_current_source'):
                 source_name = self._current_source
                 
+            # Ensure source_name is not None for default titles
+            if not source_name:
+                source_name = "unknown"
+                
             # Initialize normalized tender
             normalized = {}
             enriched_metadata = {}
 
             # Basic fields
             normalized["notice_id"] = self._extract_tender_id(tender, uuid.uuid4())
-            normalized["source"] = source_name or "unknown"
+            normalized["source"] = source_name
             
             # Try to extract content from known source formats or fall back to generic extraction
             if source_name == "sam_gov":
                 # SAM.gov specific extraction
-                normalized["notice_title"] = self._extract_field(tender, ["subject", "title", "solicitationTitle"]) or "Untitled SAM.gov Tender"
+                normalized["notice_title"] = self._extract_field(tender, ["subject", "title", "solicitationTitle"]) or f"Untitled {source_name} Tender"
                 normalized["description"] = self._clean_html(self._extract_field(tender, ["description", "body", "generalDescription"]) or "")
                 normalized["notice_type"] = self._extract_field(tender, ["type", "noticeType", "solicitationType"]) or "Default"
                 normalized["issuing_authority"] = self._extract_field(tender, ["office", "contractingOffice", "department", "agency"]) or "Unknown"
@@ -1088,7 +1092,7 @@ class TenderTrailIntegration:
                 
             elif source_name == "ted_eu":
                 # European TED specific extraction
-                normalized["notice_title"] = self._extract_field(tender, ["title", "contractTitle", "name"]) or "Untitled TED Tender"
+                normalized["notice_title"] = self._extract_field(tender, ["title", "contractTitle", "name"]) or f"Untitled {source_name} Tender"
                 normalized["description"] = self._clean_html(self._extract_field(tender, ["description", "shortDescription", "contractDescription"]) or "")
                 normalized["notice_type"] = self._extract_field(tender, ["procedureType", "contractType", "type"]) or "Default"
                 normalized["issuing_authority"] = self._extract_field(tender, ["contractingAuthority", "authority", "organization"]) or "Unknown"
@@ -1114,7 +1118,7 @@ class TenderTrailIntegration:
                     
             elif source_name == "ungm":
                 # UNGM specific extraction
-                normalized["notice_title"] = self._extract_field(tender, ["title", "tenderTitle", "subject"]) or "Untitled UNGM Tender"
+                normalized["notice_title"] = self._extract_field(tender, ["title", "tenderTitle", "subject"]) or f"Untitled {source_name} Tender"
                 normalized["description"] = self._clean_html(self._extract_field(tender, ["description", "summary", "details"]) or "")
                 normalized["notice_type"] = self._extract_field(tender, ["type", "category", "tenderType"]) or "Default"
                 normalized["issuing_authority"] = self._extract_field(tender, ["organization", "agency", "orgName"]) or "Unknown"
@@ -1130,7 +1134,7 @@ class TenderTrailIntegration:
             
             elif source_name == "wb" or source_name == "worldbank":
                 # World Bank specific extraction
-                normalized["notice_title"] = self._extract_field(tender, ["title", "projectTitle", "name"]) or "Untitled World Bank Tender"
+                normalized["notice_title"] = self._extract_field(tender, ["title", "projectTitle", "name"]) or f"Untitled {source_name} Tender"
                 normalized["description"] = self._clean_html(self._extract_field(tender, ["description", "projectDescription", "summary"]) or "")
                 normalized["notice_type"] = self._extract_field(tender, ["procurementType", "contractType", "type"]) or "Default"
                 normalized["issuing_authority"] = self._extract_field(tender, ["borrower", "client", "agency"]) or "Unknown"
@@ -1157,7 +1161,7 @@ class TenderTrailIntegration:
             # Generic extraction (fallback for all sources)
             if not normalized.get("notice_title"):
                 # Try common title fields
-                normalized["notice_title"] = self._extract_field(tender, ["title", "name", "subject", "summary", "projectTitle", "tenderTitle", "contract_title", "tender_name"]) or f"Untitled Tender from {source_name}"
+                normalized["notice_title"] = self._extract_field(tender, ["title", "name", "subject", "summary", "projectTitle", "tenderTitle", "contract_title", "tender_name"]) or f"Untitled {source_name} Tender"
                 
             if not normalized.get("description"):
                 # Try common description fields
@@ -1547,7 +1551,7 @@ class TenderTrailIntegration:
         """
         if not description:
             return []
-            
+    
         # Convert to lowercase for better matching
         text = description.lower()
         
@@ -1640,7 +1644,7 @@ class TenderTrailIntegration:
                         if response and response.data and len(response.data) > 0:
                             print(f"Found tender by ID {content}")
                             return {**response.data[0], 'source': source}
-                    except Exception as e:
+        except Exception as e:
                         print(f"Failed to fetch tender by ID: {e}")
                 
                 # Try to identify XML
@@ -1822,6 +1826,11 @@ class TenderTrailIntegration:
         ref_num = str(tender.get("notice_id", "")).lower()
         source = tender.get("source", "")
         
+        # Skip generic default titles when detecting duplicates
+        if title.startswith("untitled tender from") or "untitled" in title:
+            print(f"Skipping duplicate detection on generic title: '{title}'")
+            # Only use reference numbers for generic titles, not the title itself
+            
         # Check for exact reference number match
         for existing in normalized_tenders:
             # Convert existing reference to string before lowercasing
@@ -1832,11 +1841,19 @@ class TenderTrailIntegration:
                 print(f"Duplicate detected: identical reference number {ref_num}")
                 return True
         
-        # Check for title matches
+        # Skip title-based duplicate detection for generic titles
+        if title.startswith("untitled tender from") or "untitled" in title:
+            return False
+            
+        # Check for title matches (only for non-generic titles)
         for existing in normalized_tenders:
             # Convert existing title to string before lowercasing 
             existing_title = str(existing.get("notice_title", "")).lower()
             
+            # Skip comparing with generic titles
+            if existing_title.startswith("untitled tender from") or "untitled" in existing_title:
+                continue
+                
             # Exact title match could be a duplicate
             if title and existing_title and title == existing_title:
                 print(f"Duplicate detected: identical title '{title[:50]}...'")
@@ -2084,7 +2101,7 @@ class TenderTrailIntegration:
         """Parse a date string into ISO format (YYYY-MM-DD)."""
         if not date_str:
             return None
-        
+    
         if isinstance(date_str, (int, float)):
             # Unix timestamp
             import datetime
@@ -2151,7 +2168,7 @@ class TenderTrailIntegration:
         except Exception as e:
             print(f"Error in basic date parsing: {e}")
             return None
-
+    
     def _is_valid_date_format(self, date_str):
         """Check if a date string is in valid ISO format."""
         if not date_str:
