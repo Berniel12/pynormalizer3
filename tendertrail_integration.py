@@ -163,8 +163,8 @@ class TenderTrailIntegration:
                 print(f"Could not preview first tender: {preview_e}")
             
             return self.process_source(tenders, source_name)
-                
-            except Exception as e:
+            
+        except Exception as e:
             print(f"Error processing JSON data for source {source_name}: {e}")
             traceback.print_exc()
             return 0, 0
@@ -863,6 +863,32 @@ class TenderTrailIntegration:
                     
                     # Check response
                     if hasattr(response, 'data'):
+                        inserted_count += len(response.data)
+                    else:
+                        print("Warning: No data returned from insert operation")
+                except Exception as e:
+                    print(f"Error inserting batch: {e}")
+                    # Continue with next batch
+            
+            return inserted_count
+            
+        except Exception as e:
+            print(f"Error in _insert_normalized_tenders: {e}")
+            return 0
+    
+    async def _create_unified_tenders_table(self) -> None:
+        """Create unified_tenders table if it doesn't exist with all required columns."""
+        try:
+            # Check if table already exists
+            table_exists = False
+            try:
+                # Try direct query to see if table exists
+                loop = asyncio.get_event_loop()
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: self.supabase.table('unified_tenders').select('id').limit(1).execute()
+                )
+                if hasattr(response, 'data'):
                     table_exists = True
                     print("unified_tenders table already exists")
                     return
