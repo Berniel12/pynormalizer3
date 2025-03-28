@@ -277,7 +277,7 @@ class TenderTrailIntegration:
         # Fall back to default
         return default_id
     
-    def _get_source_schema(self, source_name):
+    async def _get_source_schema(self, source_name):
         """
         Get the schema for a source. 
         First tries to retrieve from database, then falls back to defaults.
@@ -289,17 +289,23 @@ class TenderTrailIntegration:
             Dictionary representing the source schema
         """
         print(f"DEBUG: Calling _get_source_schema with source_name='{source_name}'")
+        loop = asyncio.get_event_loop()
         
         if not source_name:
             print("DEBUG: source_name is None or empty, using default schema")
             return self._get_default_source_schema()
             
         try:
-            # Try to get schema from database
-            response = self.supabase.table('source_schemas').select('schema').eq('name', source_name).execute()
+            # Try to get schema from database using run_in_executor
+            response = await loop.run_in_executor(
+                None,
+                lambda: self.supabase.table('source_schemas').select('schema').eq('name', source_name).limit(1).execute()
+            )
+            
             if hasattr(response, 'data') and response.data and len(response.data) > 0:
                 schema = response.data[0].get('schema')
                 if schema:
+                    print(f"DEBUG: Found schema for '{source_name}' in database.")
                     if isinstance(schema, str):
                         return json.loads(schema)
                     elif isinstance(schema, dict):
@@ -423,7 +429,7 @@ class TenderTrailIntegration:
             
         return schema
     
-    def _get_target_schema(self):
+    async def _get_target_schema(self):
         """
         Get the target schema for normalization.
         First tries to retrieve from database, then falls back to defaults.
@@ -431,12 +437,19 @@ class TenderTrailIntegration:
         Returns:
             Dictionary representing the target schema
         """
+        loop = asyncio.get_event_loop()
+        
         try:
-            # Try to get schema from database
-            response = self.supabase.table('target_schema').select('schema').limit(1).execute()
+            # Try to get schema from database using run_in_executor
+            response = await loop.run_in_executor(
+                None,
+                lambda: self.supabase.table('target_schema').select('schema').limit(1).execute()
+            )
+            
             if hasattr(response, 'data') and response.data and len(response.data) > 0:
                 schema = response.data[0].get('schema')
                 if schema:
+                    print("DEBUG: Found target schema in database")
                     if isinstance(schema, str):
                         return json.loads(schema)
                     elif isinstance(schema, dict):
@@ -512,14 +525,20 @@ class TenderTrailIntegration:
             "language": "en"
         }
     
-    def _create_target_schema_table(self) -> None:
+    async def _create_target_schema_table(self) -> None:
         """Create target_schema table if it doesn't exist and insert default schema."""
+        loop = asyncio.get_event_loop()
+        
         try:
             # Check if table already exists using simple query
             try:
                 try:
-                    # Try direct query
-                    response = self.supabase.table('target_schema').select('id').limit(1).execute()
+                    # Try direct query using run_in_executor
+                    response = await loop.run_in_executor(
+                        None,
+                        lambda: self.supabase.table('target_schema').select('id').limit(1).execute()
+                    )
+                    
                     if hasattr(response, 'data'):
                         print("target_schema table already exists")
                         
@@ -528,9 +547,15 @@ class TenderTrailIntegration:
                             try:
                                 print("Adding default schema to empty target_schema table")
                                 default_schema = self._get_default_target_schema()
-                                self.supabase.table('target_schema').insert({
-                                    'schema': default_schema
-                                }).execute()
+                                
+                                # Insert using run_in_executor
+                                await loop.run_in_executor(
+                                    None,
+                                    lambda: self.supabase.table('target_schema').insert({
+                                        'schema': default_schema
+                                    }).execute()
+                                )
+                                
                                 print("Successfully added default schema to target_schema")
                             except Exception as e:
                                 print(f"Error adding default schema: {e}")
@@ -942,14 +967,20 @@ class TenderTrailIntegration:
         except Exception as e:
             print(f"Error in _create_unified_tenders_table: {e}")
 
-    def _create_errors_table(self) -> None:
+    async def _create_errors_table(self) -> None:
         """Create normalization_errors table if it doesn't exist."""
+        loop = asyncio.get_event_loop()
+        
         try:
             # Check if table already exists
             table_exists = False
             try:
-                # Try direct query to see if table exists  
-                response = self.supabase.table('normalization_errors').select('id').limit(1).execute()
+                # Try direct query to see if table exists using run_in_executor
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: self.supabase.table('normalization_errors').select('id').limit(1).execute()
+                )
+                
                 if hasattr(response, 'data'):
                     table_exists = True
                     print("normalization_errors table already exists")
@@ -1207,8 +1238,8 @@ class TenderTrailIntegration:
                 error_tenders += 1
                 
         # Get schemas
-        source_schema = self._get_source_schema(source_name)
-        target_schema = self._get_target_schema()
+        source_schema = await self._get_source_schema(source_name)
+        target_schema = await self._get_target_schema()
         
         # Second pass to normalize and validate
         for tender in cleaned_data:
