@@ -371,34 +371,229 @@ class TenderNormalizer:
         # Load caches from disk if they exist
         self._load_caches()
     
-    def normalize_tender(self, tender_data: Dict[str, Any], source_schema: Dict[str, Any], 
-                         target_schema: Dict[str, Any]) -> Dict[str, Any]:
-        """Normalize tender data from source schema to target schema."""
-        normalized_tender = {}
+    def normalize_tender(self, tender_data: Dict[str, Any], source_schema: Dict[str, Any] = None, target_schema: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        Normalize a tender using the LLM.
         
-        # Process each field in the target schema
-        for field_name, field_info in target_schema.items():
-            # Check if field exists in mapping
-            source_field = self._get_source_field(field_name, source_schema)
+        Args:
+            tender_data: The tender data to normalize
+            source_schema: Schema describing the source data format
+            target_schema: Schema describing the target data format
             
-            if source_field and source_field in tender_data:
-                # Get the value from source data
-                value = tender_data[source_field]
+        Returns:
+            Normalized tender data
+        """
+        try:
+            # Debug logging
+            print(f"DEBUG: Normalizing tender with keys: {list(tender_data.keys()) if isinstance(tender_data, dict) else type(tender_data)}")
+            
+            # Validate input types
+            if not isinstance(tender_data, dict):
+                print(f"ERROR: tender_data is not a dictionary: {type(tender_data)}")
+                return None
                 
-                # Check if translation is needed
-                if field_info.get("requires_translation", False) and value:
-                    source_lang = source_schema.get("language", "en")
-                    target_lang = target_schema.get("language", "en")
-                    value = self.translate_text(value, source_lang, target_lang)
+            # Validate source_schema if provided
+            if source_schema is not None and not isinstance(source_schema, dict):
+                print(f"WARNING: source_schema is not a dictionary: {type(source_schema)}")
+                source_schema = {}  # Use empty dict as fallback
                 
-                # Normalize the field value
-                normalized_value = self.normalize_field(field_name, value, target_schema)
-                normalized_tender[field_name] = normalized_value
-            else:
-                # Try to extract from other fields or set default
-                normalized_tender[field_name] = self._extract_or_default(field_name, tender_data, target_schema)
+            # Validate target_schema if provided
+            if target_schema is not None and not isinstance(target_schema, dict):
+                print(f"WARNING: target_schema is not a dictionary: {type(target_schema)}")
+                target_schema = {}  # Use empty dict as fallback
+            
+            # Construct messages for the LLM
+            messages = self._construct_messages(tender_data, source_schema, target_schema)
+            
+            # Cache key for this request
+            cache_key = self._generate_cache_key(tender_data, messages)
+            
+            # Check cache first
+            cached_response = self._check_cache(cache_key)
+            if cached_response:
+                print("DEBUG: Using cached response")
+                return cached_response
+                
+            # Call the LLM API
+            completion = self._call_api(messages)
+            
+            # If we have an error, return None
+            if not completion or 'error' in completion:
+                print(f"Error in LLM API call: {completion.get('error', 'Unknown error') if isinstance(completion, dict) else 'No completion'}")
+                return None
+                
+            # Parse and validate the response
+            normalized_tender = self._parse_response(completion)
+            
+            # Cache the result if valid
+            if normalized_tender and isinstance(normalized_tender, dict):
+                self._update_cache(cache_key, normalized_tender)
+            
+            return normalized_tender
+            
+        except Exception as e:
+            import traceback
+            print(f"Error in normalize_tender: {e}")
+            traceback.print_exc()
+            return None
+            
+    def _construct_messages(self, tender_data: Dict[str, Any], source_schema: Dict[str, Any] = None, target_schema: Dict[str, Any] = None) -> List[Dict[str, str]]:
+        """
+        Construct the messages for the LLM.
         
-        return normalized_tender
+        Args:
+            tender_data: The tender data to normalize
+            source_schema: Schema describing the source data format
+            target_schema: Schema describing the target data format
+            
+        Returns:
+            List of messages for the LLM
+        """
+        # Ensure safe copying of dictionaries
+        tender_data_safe = self._safe_copy(tender_data)
+        source_schema_safe = self._safe_copy(source_schema) if source_schema else {}
+        target_schema_safe = self._safe_copy(target_schema) if target_schema else {}
+        
+        import json
+        
+        # Prepare the system message
+        system_message = {
+            "role": "system",
+            "content": """You are a specialized tender normalization assistant. Your task is to take raw tender data and normalize it according to a target schema.
+Extract the relevant information from the input data and structure it according to the target schema.
+If a field is not present in the input, leave it empty in the output.
+Your output must be a valid JSON object that follows the target schema exactly.
+"""
+        }
+        
+        # Prepare the user message
+        user_content = "Please normalize the following tender data:"
+        user_content += f"\n\nInput tender data:\n{json.dumps(tender_data_safe, indent=2)}"
+        
+        if source_schema_safe:
+            user_content += f"\n\nSource schema:\n{json.dumps(source_schema_safe, indent=2)}"
+            
+        if target_schema_safe:
+            user_content += f"\n\nTarget schema:\n{json.dumps(target_schema_safe, indent=2)}"
+        else:
+            # Provide a default target schema if none is provided
+            default_schema = {
+                "title": "Tender title",
+                "description": "Tender description",
+                "date_published": "Publication date (YYYY-MM-DD)",
+                "closing_date": "Closing date (YYYY-MM-DD)",
+                "tender_type": "Type of tender",
+                "tender_value": "Monetary value of the tender",
+                "tender_currency": "Currency code (e.g., USD)",
+                "location": "Geographical location",
+                "issuing_authority": "Organization issuing the tender",
+                "keywords": "Keywords or tags",
+                "contact_information": "Contact details",
+                "source": "Source of the tender"
+            }
+            user_content += f"\n\nTarget schema:\n{json.dumps(default_schema, indent=2)}"
+        
+        user_content += "\n\nPlease output only the normalized JSON without any additional text."
+        
+        user_message = {
+            "role": "user",
+            "content": user_content
+        }
+        
+        return [system_message, user_message]
+        
+    def _safe_copy(self, obj):
+        """
+        Create a safe copy of nested structures, converting to serializable types.
+        """
+        if isinstance(obj, dict):
+            return {k: self._safe_copy(v) for k, v in obj.items() if k is not None}
+        elif isinstance(obj, list):
+            return [self._safe_copy(item) for item in obj]
+        elif isinstance(obj, (str, int, float, bool, type(None))):
+            return obj
+        else:
+            # Convert non-serializable types to string
+            return str(obj)
+        
+    def _parse_response(self, completion):
+        """
+        Parse the completion from the LLM.
+        
+        Args:
+            completion: The completion from the LLM
+            
+        Returns:
+            The parsed normalized tender data
+        """
+        try:
+            # Debug logging
+            print(f"DEBUG: Parsing LLM response type: {type(completion)}")
+            
+            # Handle different response formats based on provider
+            if isinstance(completion, dict):
+                # OpenAI API format
+                if 'choices' in completion and len(completion['choices']) > 0:
+                    if 'message' in completion['choices'][0]:
+                        content = completion['choices'][0]['message'].get('content', '')
+                    else:
+                        content = completion['choices'][0].get('text', '')
+                # Anthropic API format
+                elif 'content' in completion:
+                    # For Claude API that returns directly
+                    content = completion['content']
+                else:
+                    print(f"Unexpected API response format: {completion}")
+                    return None
+            elif isinstance(completion, str):
+                # Direct string content
+                content = completion
+            else:
+                print(f"Unexpected completion type: {type(completion)}")
+                return None
+                
+            if not content:
+                print("Empty content in LLM response")
+                return None
+                
+            # Extract JSON from the response
+            import json
+            import re
+            
+            # Find JSON in the content (in case there's surrounding text)
+            json_matches = re.findall(r'```(?:json)?\s*([\s\S]*?)```', content)
+            
+            if json_matches:
+                # Use the first JSON block found
+                json_str = json_matches[0]
+            else:
+                # Try to find anything that looks like JSON
+                if content.strip().startswith('{') and content.strip().endswith('}'):
+                    json_str = content.strip()
+                else:
+                    # One more attempt to extract just the JSON object
+                    json_match = re.search(r'({[\s\S]*})', content)
+                    if json_match:
+                        json_str = json_match.group(1)
+                    else:
+                        print(f"No JSON found in response: {content[:100]}...")
+                        return None
+                        
+            # Parse the JSON
+            try:
+                normalized_tender = json.loads(json_str)
+                if not isinstance(normalized_tender, dict):
+                    print(f"Parsed JSON is not a dictionary: {type(normalized_tender)}")
+                    return None
+                return normalized_tender
+            except json.JSONDecodeError as e:
+                print(f"Error decoding JSON: {e}")
+                print(f"JSON string: {json_str[:100]}...")
+                return None
+                
+        except Exception as e:
+            print(f"Error parsing LLM response: {e}")
+            return None
     
     def normalize_field(self, field_name: str, field_value: str, target_schema: Dict[str, Any]) -> str:
         """Normalize a field value according to the target schema."""
