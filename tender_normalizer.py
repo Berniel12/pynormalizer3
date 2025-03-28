@@ -594,7 +594,111 @@ Your output must be a valid JSON object that follows the target schema exactly.
         except Exception as e:
             print(f"Error parsing LLM response: {e}")
             return None
+            
+    def _generate_cache_key(self, tender_data: Dict[str, Any], messages: List[Dict[str, str]]) -> str:
+        """
+        Generate a unique cache key for this normalization request.
+        
+        Args:
+            tender_data: The tender data to normalize
+            messages: The messages for the LLM
+            
+        Returns:
+            A unique cache key as a string
+        """
+        import hashlib
+        import json
+        
+        # Create a deterministic representation of the input
+        safe_tender = self._safe_copy(tender_data)
+        
+        # Create a combined representation for hashing
+        cache_data = {
+            "tender": safe_tender,
+            "messages": [msg.get("content", "") for msg in messages]  # Just use message content for simpler hashing
+        }
+        
+        # Convert to JSON and hash
+        try:
+            json_str = json.dumps(cache_data, sort_keys=True)
+            return hashlib.md5(json_str.encode('utf-8')).hexdigest()
+        except Exception as e:
+            print(f"Error generating cache key: {e}")
+            # Fallback to a timestamp-based key if JSON serialization fails
+            import time
+            return f"fallback-{int(time.time())}"
     
+    def _check_cache(self, cache_key: str) -> Optional[Dict[str, Any]]:
+        """
+        Check if a cached response exists for this cache key.
+        
+        Args:
+            cache_key: The cache key to check
+            
+        Returns:
+            The cached normalized tender data, or None if not found
+        """
+        return self.normalization_cache.get(cache_key)
+    
+    def _update_cache(self, cache_key: str, normalized_tender: Dict[str, Any]) -> None:
+        """
+        Update the cache with a new normalized tender.
+        
+        Args:
+            cache_key: The cache key to update
+            normalized_tender: The normalized tender data to cache
+        """
+        self.normalization_cache[cache_key] = normalized_tender
+        self._save_cache("normalization")
+    
+    def _call_api(self, messages: List[Dict[str, str]]) -> Union[Dict[str, Any], str]:
+        """
+        Call the LLM API with the given messages.
+        
+        Args:
+            messages: The messages to send to the LLM
+            
+        Returns:
+            The response from the LLM API
+        """
+        try:
+            # Use the provider's API call method if it supports message format
+            if hasattr(self.provider, '_call_api') and callable(getattr(self.provider, '_call_api')):
+                system_message = messages[0]['content'] if messages and messages[0]['role'] == 'system' else ""
+                user_message = messages[1]['content'] if len(messages) > 1 and messages[1]['role'] == 'user' else ""
+                
+                # Combine system and user messages if needed
+                prompt = f"{system_message}\n\n{user_message}" if system_message else user_message
+                return self.provider._call_api(prompt)
+            else:
+                # Fallback for providers without direct message support
+                print("Provider does not support direct API calls, using extract_structured_data instead")
+                # Extract schema from messages
+                schema = {}
+                for msg in messages:
+                    if msg['role'] == 'user' and 'Target schema' in msg['content']:
+                        import re
+                        import json
+                        schema_match = re.search(r'Target schema:\s*(\{.*\})', msg['content'], re.DOTALL)
+                        if schema_match:
+                            try:
+                                schema = json.loads(schema_match.group(1))
+                            except:
+                                pass
+                
+                # Extract tender data from messages
+                tender_text = ""
+                for msg in messages:
+                    if msg['role'] == 'user' and 'Input tender data' in msg['content']:
+                        tender_text = msg['content']
+                        break
+                
+                # Use extract_structured_data as fallback
+                return self.provider.extract_structured_data(tender_text, schema or {})
+        except Exception as e:
+            print(f"Error calling LLM API: {e}")
+            return {"error": str(e)}
+
     def normalize_field(self, field_name: str, field_value: str, target_schema: Dict[str, Any]) -> str:
         """Normalize a field value according to the target schema."""
         # Check cache first
