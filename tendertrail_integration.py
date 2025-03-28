@@ -592,16 +592,91 @@ class TenderTrailIntegration:
     async def _get_raw_tenders(self, source_name: str, batch_size: int) -> List[Dict[str, Any]]:
         """Get raw tenders from the database for a source."""
         try:
+            print(f"DEBUG: Fetching tenders from source table: {source_name}")
+            
             # Use run_in_executor to run Supabase client calls asynchronously
             loop = asyncio.get_event_loop()
+            
+            # Use a basic query without depending on created_at
+            # This matches the original implementation
             response = await loop.run_in_executor(
                 None,
-                lambda: self.supabase.table(source_name).select('*').order('created_at', desc=True).limit(batch_size).execute()
+                lambda: self.supabase.table(source_name).select('*').limit(batch_size).execute()
             )
             
             # Check if the response contains data
             if hasattr(response, 'data'):
-                return response.data
+                raw_tenders = response.data
+                print(f"DEBUG: Fetched {len(raw_tenders)} tenders from {source_name}")
+                
+                # Basic data validation and cleaning for robustness
+                processed_tenders = []
+                for item in raw_tenders:
+                    try:
+                        # If it's already a dict, use it
+                        if isinstance(item, dict):
+                            # Ensure source is set
+                            if 'source' not in item:
+                                item['source'] = source_name
+                            processed_tenders.append(item)
+                            continue
+                        
+                        # If it's a string, try to parse it as JSON
+                        if isinstance(item, str):
+                            try:
+                                parsed = json.loads(item)
+                                if isinstance(parsed, dict):
+                                    if 'source' not in parsed:
+                                        parsed['source'] = source_name
+                                    processed_tenders.append(parsed)
+                                    continue
+                            except json.JSONDecodeError:
+                                # Not valid JSON, wrap it
+                                processed_tenders.append({
+                                    'content': item,
+                                    'source': source_name,
+                                    'id': str(uuid.uuid4())
+                                })
+                                continue
+                        
+                        # If it has a get method (like a Record object)
+                        if hasattr(item, 'get') and callable(item.get):
+                            # Create a dictionary from the object
+                            dict_item = {}
+                            for key in ['id', 'title', 'description', 'data', 'content', 'body', 'source']:
+                                try:
+                                    value = item.get(key)
+                                    if value is not None:
+                                        dict_item[key] = value
+                                except:
+                                    pass
+                            
+                            # Ensure source is set
+                            if 'source' not in dict_item:
+                                dict_item['source'] = source_name
+                                
+                            # If we extracted at least something, use it
+                            if dict_item:
+                                processed_tenders.append(dict_item)
+                                continue
+                        
+                        # Last resort - wrap in a minimal dict
+                        processed_tenders.append({
+                            'data': str(item),
+                            'source': source_name,
+                            'id': str(uuid.uuid4())
+                        })
+                        
+                    except Exception as item_e:
+                        print(f"Error processing tender item: {item_e}")
+                        # Still include it as a wrapped error item for visibility
+                        processed_tenders.append({
+                            'error': str(item_e),
+                            'source': source_name,
+                            'id': str(uuid.uuid4())
+                        })
+                
+                return processed_tenders
             else:
                 print(f"No data found for source {source_name}")
                 return []
@@ -1244,6 +1319,15 @@ class TenderTrailIntegration:
         # Second pass to normalize and validate
         for tender in cleaned_data:
             try:
+                # Debug info for tender type
+                print(f"DEBUG: Processing tender of type {type(tender)}")
+                
+                # Ensure tender is a dictionary
+                if not isinstance(tender, dict):
+                    print(f"WARNING: Expected dict but got {type(tender)}: {str(tender)[:100]}")
+                    tender = self._ensure_dict(tender)
+                    print(f"DEBUG: Converted to dict: {str(tender)[:100]}")
+                
                 # Preprocess the tender using the preprocessor if available
                 preprocessed_tender = None
                 if hasattr(self, 'preprocessor') and self.preprocessor:
@@ -1261,6 +1345,9 @@ class TenderTrailIntegration:
                 
                 # Use the preprocessed tender if available, otherwise use the original
                 tender_to_normalize = preprocessed_tender if preprocessed_tender else tender
+                
+                # Debug info for tender_to_normalize
+                print(f"DEBUG: Tender to normalize - Type: {type(tender_to_normalize)}")
                 
                 # Try to use the LLM normalizer if available
                 normalized_tender = None
@@ -1524,3 +1611,439 @@ class TenderTrailIntegration:
             else:
                 d[element.tag] = text
         return d
+
+    def _clean_html(self, html_content: str) -> str:
+        """Clean HTML content to extract plain text."""
+        if not html_content:
+            return ""
+            
+        # Try to use BeautifulSoup if available
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            # Remove script and style elements
+            for script_or_style in soup(["script", "style"]):
+                script_or_style.extract()
+                
+            # Get text and clean whitespace
+            text = soup.get_text(separator=" ", strip=True)
+            
+            # Clean up whitespace issues
+            lines = (line.strip() for line in text.splitlines())
+            chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+            text = ' '.join(chunk for chunk in chunks if chunk)
+            
+            return text
+        except ImportError:
+            print("BeautifulSoup not available, using basic HTML cleaning")
+            
+        # Basic fallback cleaning if BeautifulSoup is not available
+        import re
+        
+        # Remove HTML tags
+        clean_text = re.sub(r'<[^>]+>', ' ', html_content)
+        
+        # Remove extra whitespace
+        clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+        
+        # Replace HTML entities
+        entities = {
+            '&nbsp;': ' ', '&lt;': '<', '&gt;': '>', '&amp;': '&',
+            '&quot;': '"', '&apos;': "'", '&ndash;': '-', '&mdash;': '-',
+            '&lsquo;': "'", '&rsquo;': "'", '&ldquo;': '"', '&rdquo;': '"'
+        }
+        for entity, replacement in entities.items():
+            clean_text = clean_text.replace(entity, replacement)
+            
+        return clean_text
+
+    def _normalize_tender(self, tender, source_name=None):
+        """
+        Rule-based tender normalization (fallback when LLM normalization fails).
+        
+        Args:
+            tender: Dictionary containing tender data
+            source_name: Name of the source (used for source-specific logic)
+            
+        Returns:
+            Dictionary with normalized tender data or None if normalization fails
+        """
+        try:
+            # Skip empty tenders
+            if not tender:
+                return None
+                
+            # Ensure tender is a dictionary
+            if not isinstance(tender, dict):
+                print(f"Cannot normalize non-dictionary tender: {type(tender)}")
+                return None
+                
+            # Create a copy to avoid modifying the original
+            normalized = {}
+            
+            # Get source name if not provided
+            if not source_name:
+                source_name = tender.get('source', self._current_source)
+                if not source_name:
+                    source_name = "unknown"
+            
+            # Add source to normalized data
+            normalized['source'] = source_name
+            
+            # Map common fields
+            field_mapping = {
+                # Title
+                'title': 'notice_title',
+                'name': 'notice_title',
+                'subject': 'notice_title',
+                'noticeTitle': 'notice_title',
+                'tender_title': 'notice_title',
+                
+                # Description
+                'description': 'description',
+                'details': 'description',
+                'summary': 'description',
+                'noticeDescription': 'description',
+                'text': 'description',
+                'content': 'description',
+                'body': 'description',
+                
+                # Date Published
+                'date_published': 'date_published',
+                'datePublished': 'date_published',
+                'publicationDate': 'date_published',
+                'published': 'date_published',
+                'publishedDate': 'date_published',
+                'created_at': 'date_published',
+                'createdAt': 'date_published',
+                'publication_date': 'date_published',
+                
+                # Closing Date
+                'closing_date': 'closing_date',
+                'closeDate': 'closing_date',
+                'deadline': 'closing_date',
+                'deadlineDate': 'closing_date',
+                'submissionDeadline': 'closing_date',
+                'expiryDate': 'closing_date',
+                'expiry_date': 'closing_date',
+                'end_date': 'closing_date',
+                'endDate': 'closing_date',
+                
+                # Tender Value
+                'tender_value': 'tender_value',
+                'value': 'tender_value',
+                'amount': 'tender_value',
+                'budget': 'tender_value',
+                'estimatedValue': 'tender_value',
+                'estimated_value': 'tender_value',
+                'contractValue': 'tender_value',
+                'contract_value': 'tender_value',
+                
+                # Currency
+                'currency': 'currency',
+                'currencyCode': 'currency',
+                'currency_code': 'currency',
+                
+                # Location
+                'location': 'location',
+                'country': 'country',
+                'region': 'location',
+                'place': 'location',
+                'placeOfPerformance': 'location',
+                'place_of_performance': 'location',
+                
+                # Issuing Authority
+                'issuing_authority': 'issuing_authority',
+                'issuingAuthority': 'issuing_authority',
+                'buyer': 'issuing_authority',
+                'agency': 'issuing_authority',
+                'organization': 'issuing_authority',
+                'authority': 'issuing_authority',
+                'contractingAuthority': 'issuing_authority',
+                'contracting_authority': 'issuing_authority',
+                'procuring_entity': 'issuing_authority',
+                'procuringEntity': 'issuing_authority',
+                
+                # Tender Type
+                'tender_type': 'notice_type',
+                'type': 'notice_type',
+                'noticeType': 'notice_type',
+                'notice_type': 'notice_type',
+                'procedureType': 'notice_type',
+                'procedure_type': 'notice_type',
+                
+                # Notice ID / Reference
+                'notice_id': 'notice_id',
+                'id': 'notice_id',
+                'reference': 'notice_id',
+                'referenceNumber': 'notice_id',
+                'reference_number': 'notice_id',
+                'tenderReference': 'notice_id',
+                'tender_reference': 'notice_id',
+                
+                # URL
+                'url': 'url',
+                'link': 'url',
+                'tender_url': 'url',
+                'tenderUrl': 'url',
+                'noticeUrl': 'url',
+                'notice_url': 'url',
+                
+                # Contact Information
+                'contact': 'contact_information',
+                'contactPerson': 'contact_information',
+                'contact_person': 'contact_information',
+                'contactEmail': 'contact_email',
+                'contact_email': 'contact_email',
+                'contactPhone': 'contact_phone',
+                'contact_phone': 'contact_phone'
+            }
+            
+            # Map fields from tender to normalized tender
+            for source_field, target_field in field_mapping.items():
+                if source_field in tender and tender[source_field] is not None:
+                    # Clean text fields
+                    if source_field in ['description', 'details', 'summary', 'text', 'content', 'body']:
+                        # Format description
+                        if isinstance(tender[source_field], str):
+                            normalized[target_field] = self._clean_html(tender[source_field])
+                    elif source_field in ['date_published', 'datePublished', 'publicationDate', 'published', 
+                                        'publishedDate', 'created_at', 'createdAt', 'publication_date',
+                                        'closing_date', 'closeDate', 'deadline', 'deadlineDate', 
+                                        'submissionDeadline', 'expiryDate', 'expiry_date', 'end_date', 'endDate']:
+                        # Parse dates
+                        date_value = self._parse_date(tender[source_field])
+                        if date_value:
+                            normalized[target_field] = date_value
+                    else:
+                        # Copy other fields directly
+                        normalized[target_field] = tender[source_field]
+            
+            # Try to extract raw_id if not already set
+            if 'raw_id' not in normalized and 'notice_id' in normalized:
+                normalized['raw_id'] = normalized['notice_id']
+            elif 'raw_id' not in normalized and 'id' in tender:
+                normalized['raw_id'] = tender['id']
+                
+            # Handle special case for title/name
+            if 'notice_title' not in normalized:
+                for title_field in ['heading', 'header', 'noticeHeader', 'notice_header', 'label']:
+                    if title_field in tender and tender[title_field]:
+                        normalized['notice_title'] = tender[title_field]
+                        break
+                        
+            # Generate a generic title if none exists
+            if 'notice_title' not in normalized or not normalized['notice_title']:
+                normalized['notice_title'] = f"Tender from {source_name}"
+                
+            # Normalize dates
+            for date_field in ['date_published', 'closing_date']:
+                if date_field in normalized and not self._is_valid_date_format(normalized[date_field]):
+                    parsed_date = self._parse_date(normalized[date_field])
+                    if parsed_date:
+                        normalized[date_field] = parsed_date
+                    else:
+                        normalized.pop(date_field, None)
+                        
+            # Extract tender value and currency if combined
+            if 'tender_value' in normalized and isinstance(normalized['tender_value'], str):
+                import re
+                # Look for currency codes or symbols in the value
+                value_str = normalized['tender_value']
+                currency_pattern = r'([A-Z]{3}|\$|€|£|¥)'
+                matches = re.findall(currency_pattern, value_str)
+                if matches:
+                    # Extract the first currency match
+                    currency = matches[0]
+                    # Convert symbols to codes
+                    currency_map = {'$': 'USD', '€': 'EUR', '£': 'GBP', '¥': 'JPY'}
+                    if currency in currency_map:
+                        currency = currency_map[currency]
+                    normalized['currency'] = currency
+                    
+                    # Extract numeric value
+                    numeric_part = re.sub(r'[^\d.]', '', value_str)
+                    if numeric_part:
+                        normalized['tender_value'] = numeric_part.strip()
+                        
+            # Clean up whitespace in text fields
+            for field in ['notice_title', 'description', 'issuing_authority', 'location']:
+                if field in normalized and isinstance(normalized[field], str):
+                    normalized[field] = normalized[field].strip()
+                    
+            # Source-specific normalization
+            if source_name == 'ungm':
+                # UNGM-specific field mapping
+                if 'deadline' in tender and not 'closing_date' in normalized:
+                    normalized['closing_date'] = self._parse_date(tender['deadline'])
+                if 'agency' in tender and not 'issuing_authority' in normalized:
+                    normalized['issuing_authority'] = tender['agency']
+                    
+            elif source_name == 'ted_eu':
+                # TED EU-specific field mapping
+                if 'cpvs' in tender and not 'keywords' in normalized:
+                    normalized['keywords'] = tender['cpvs']
+                    
+            elif source_name == 'wb' or source_name == 'worldbank':
+                # World Bank specific field mapping
+                if 'borrower' in tender and not 'issuing_authority' in normalized:
+                    normalized['issuing_authority'] = tender['borrower']
+                    
+            return normalized
+                
+        except Exception as e:
+            print(f"Error in rule-based normalization: {e}")
+            traceback.print_exc()
+            return None
+
+    def _detect_potential_duplicate(self, tender, existing_tenders):
+        """
+        Detect if a tender is potentially a duplicate of existing tenders.
+        Uses multiple heuristics to improve accuracy.
+        
+        Args:
+            tender: The new tender to check
+            existing_tenders: List of already processed tenders to check against
+            
+        Returns:
+            bool: True if potential duplicate found, False otherwise
+        """
+        print(f"DEBUG: Checking for duplicates for tender: {str(tender.get('notice_title', ''))[:50]}")
+        
+        # If no title or ID, can't do duplicate detection
+        if not tender.get('notice_title') and not tender.get('notice_id') and not tender.get('raw_id'):
+            print("DEBUG: Can't check for duplicates - no title or ID")
+            return False
+            
+        # Check by ID first
+        tender_id = tender.get('notice_id') or tender.get('raw_id')
+        if tender_id:
+            for existing in existing_tenders:
+                existing_id = existing.get('notice_id') or existing.get('raw_id')
+                if existing_id and existing_id == tender_id:
+                    print(f"DEBUG: Duplicate detected by ID: {tender_id}")
+                    return True
+                    
+        # Check by title if available
+        title = tender.get('notice_title')
+        if title:
+            # Skip generic titles like "Tender from source"
+            if re.match(r'^Tender from', title):
+                # If title is generic, need more evidence to detect duplicate
+                location_match = False
+                date_match = False
+                
+                # Try to match by location and date
+                for existing in existing_tenders:
+                    # Check location match
+                    if (tender.get('location') and existing.get('location') and 
+                        tender['location'] == existing['location']):
+                        location_match = True
+                        
+                    # Check date match
+                    if (tender.get('date_published') and existing.get('date_published') and 
+                        tender['date_published'] == existing['date_published']):
+                        date_match = True
+                        
+                    # If both location and date match, it's likely a duplicate
+                    if location_match and date_match:
+                        print("DEBUG: Generic title but location and date match - likely duplicate")
+                        return True
+                        
+                # Otherwise, it's probably a different tender
+                print("DEBUG: Generic title but not enough evidence for duplicate")
+                return False
+            
+            # Normal title comparison
+            for existing in existing_tenders:
+                existing_title = existing.get('notice_title', '')
+                if not existing_title:
+                    continue
+                    
+                # Exact title match
+                if title == existing_title:
+                    print(f"DEBUG: Duplicate detected by exact title match: {title[:50]}")
+                    return True
+                    
+                # Check for significant title similarity
+                # Calculate title similarity ratio
+                similarity = self._calculate_similarity(title, existing_title)
+                if similarity > 0.85:  # High similarity threshold
+                    print(f"DEBUG: Duplicate detected by title similarity ({similarity:.2f}): {title[:50]}")
+                    return True
+                    
+        return False
+        
+    def _calculate_similarity(self, str1, str2):
+        """Calculate string similarity using difflib."""
+        import difflib
+        return difflib.SequenceMatcher(None, str1, str2).ratio()
+
+    def _validate_normalized_tender(self, tender):
+        """
+        Validate a normalized tender for completeness and correctness.
+        
+        Args:
+            tender: Dictionary containing normalized tender data
+            
+        Returns:
+            Tuple (is_valid, message) where:
+                is_valid: Boolean indicating if the tender is valid
+                message: Validation message or error
+        """
+        # Check if tender is a dictionary
+        if not isinstance(tender, dict):
+            return False, f"Tender is not a dictionary (type: {type(tender)})"
+            
+        # Check for required fields
+        required_fields = ['notice_title', 'source']
+        for field in required_fields:
+            if field not in tender or not tender[field]:
+                return False, f"Missing required field: {field}"
+                
+        # Check date formats if they exist
+        for date_field in ['date_published', 'closing_date']:
+            if date_field in tender and tender[date_field]:
+                if not self._is_valid_date_format(tender[date_field]):
+                    parsed_date = self._parse_date(tender[date_field])
+                    if parsed_date:
+                        tender[date_field] = parsed_date
+                    else:
+                        return False, f"Invalid date format for {date_field}: {tender[date_field]}"
+                        
+        # Check description length if it exists
+        if 'description' in tender and tender['description']:
+            if len(tender['description']) < 10:
+                return False, f"Description too short: {tender['description']}"
+                
+        # Check title length
+        if len(tender['notice_title']) < 5:
+            return False, f"Title too short: {tender['notice_title']}"
+            
+        # Add basic metadata if missing
+        if 'metadata' not in tender:
+            tender['metadata'] = {
+                'normalized_at': self._get_current_timestamp(),
+                'normalization_method': 'rule_based'
+            }
+        elif not isinstance(tender['metadata'], dict):
+            tender['metadata'] = {
+                'normalized_at': self._get_current_timestamp(),
+                'normalization_method': 'rule_based',
+                'original_metadata': str(tender['metadata'])
+            }
+            
+        return True, "Tender is valid"
+        
+    def _format_date(self, date_input):
+        """Format a date input to ISO format (YYYY-MM-DD)."""
+        if not date_input:
+            return None
+            
+        # If already a valid ISO format, return as is
+        if self._is_valid_date_format(date_input):
+            return date_input
+            
+        # Use _parse_date for other formats
+        return self._parse_date(date_input)
