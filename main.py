@@ -47,7 +47,7 @@ async def main():
         
         if process_all_sources or not source_name:
             # Get all available sources
-            sources = get_available_sources(integration.supabase)
+            sources = await get_available_sources(integration.supabase)
             if not sources:
                 print("No sources found. Please create source tables or specify a source name.")
                 return
@@ -57,7 +57,7 @@ async def main():
             for source in sources:
                 print(f"Starting normalization for source: {source}")
                 # Process source returns a tuple (processed_count, error_count)
-                processed_count, error_count = integration.process_source(source, batch_size)
+                processed_count, error_count = await integration.process_source(source, batch_size)
                 
                 # Convert to dictionary
                 result = {
@@ -73,7 +73,7 @@ async def main():
             # Process single source
             print(f"Starting normalization for source: {source_name}")
             # Process source returns a tuple (processed_count, error_count)
-            processed_count, error_count = integration.process_source(source_name, batch_size)
+            processed_count, error_count = await integration.process_source(source_name, batch_size)
             
             # Convert to dictionary
             result = {
@@ -100,12 +100,16 @@ async def main():
         
         print(f"All normalization completed. Processed {combined_result['total_processed']} tenders across {combined_result['sources_processed']} sources.")
 
-def get_available_sources(supabase):
+async def get_available_sources(supabase):
     """Get all available tender sources from the database."""
     try:
         # Try to get sources from the source_schemas table
-        response = supabase.table('source_schemas').select('name').execute()
-        if response.data:
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: supabase.table('source_schemas').select('name').execute()
+        )
+        if hasattr(response, 'data') and response.data:
             return [source['name'] for source in response.data]
     except Exception as e:
         print(f"Error getting sources from source_schemas: {e}")
