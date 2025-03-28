@@ -59,15 +59,19 @@ class TenderTrailIntegration:
             Tuple (processed_count, error_count)
         """
         # Detect which call pattern is being used
-        if isinstance(tenders_or_source, (list, tuple)) or (isinstance(tenders_or_source, str) and source_name_or_batch_size is not None):
+        if isinstance(tenders_or_source, (list, tuple)) or (isinstance(tenders_or_source, str) and source_name_or_batch_size is not None and not isinstance(source_name_or_batch_size, int)):
             # First pattern: process_source(tenders, source_name)
             tenders = tenders_or_source
             source_name = source_name_or_batch_size
             batch_size = None
+            print(f"DEBUG: Using first pattern - direct tenders list with source_name='{source_name}'")
         else:
             # Second pattern: process_source(source_name, batch_size)
             source_name = tenders_or_source
-            batch_size = source_name_or_batch_size or 100
+            batch_size = 100  # Default
+            if source_name_or_batch_size is not None and isinstance(source_name_or_batch_size, int):
+                batch_size = source_name_or_batch_size
+            print(f"DEBUG: Using second pattern - source_name='{source_name}' with batch_size={batch_size}")
             # Get tenders from database
             tenders = await self._get_raw_tenders(source_name, batch_size)
         
@@ -284,7 +288,10 @@ class TenderTrailIntegration:
         Returns:
             Dictionary representing the source schema
         """
+        print(f"DEBUG: Calling _get_source_schema with source_name='{source_name}'")
+        
         if not source_name:
+            print("DEBUG: source_name is None or empty, using default schema")
             return self._get_default_source_schema()
             
         try:
@@ -1304,3 +1311,185 @@ class TenderTrailIntegration:
                 
         print(f"Enhanced processing results: {len(processed_tenders)} valid tenders, {skipped_tenders} skipped, {error_tenders} errors")
         return processed_tenders
+
+    async def _extract_structured_data(self, content, source):
+        """
+        Extract structured data from various content formats.
+
+        Args:
+            content: Content to extract data from
+            source: Source name for context
+
+        Returns:
+            Dictionary of structured data or None if extraction fails significantly
+        """
+        loop = asyncio.get_event_loop() # Get event loop for run_in_executor if needed
+        try:
+            # Print some debug info to see what we're working with
+            content_preview = str(content)[:100] if isinstance(content, (str, bytes)) else type(content).__name__
+            print(f"Extracting data from content type {type(content)}: {content_preview}...")
+
+            # --- Handle String Content ---
+            if isinstance(content, str):
+                content_strip = content.strip()
+
+                # If it's a short string, potentially an ID
+                if 0 < len(content_strip) < 50 and content_strip.isalnum():
+                    print(f"Content is short, trying to use it as an ID: {content_strip}")
+                    try:
+                        response = await loop.run_in_executor(
+                            None,
+                            lambda: self.supabase.table(source).select('*').eq('id', content_strip).limit(1).execute()
+                        )
+                        if hasattr(response, 'data') and response.data:
+                            print(f"Found tender by ID {content_strip}")
+                            fetched_data = response.data[0]
+                            if isinstance(fetched_data, dict):
+                                fetched_data['source'] = source # Ensure source is set
+                                return fetched_data
+                            else:
+                                print(f"Fetched data for ID {content_strip} is not a dict.")
+                        else:
+                            print(f"No tender found for ID {content_strip}")
+                    except Exception as e:
+                        print(f"Failed to fetch tender by ID '{content_strip}': {e}")
+                    # Fall through to treat as text if ID fetch fails or returns nothing
+
+                # Try to identify XML
+                if content_strip.startswith('<?xml') or (content_strip.startswith('<') and content_strip.endswith('>')):
+                    import xml.etree.ElementTree as ET
+                    try:
+                        root = ET.fromstring(content_strip)
+                        xml_dict = self._xml_to_dict(root)
+                        xml_dict['source'] = source
+                        print("Parsed content as XML")
+                        return xml_dict
+                    except Exception as xml_e:
+                        print(f"XML parsing failed (will treat as text): {xml_e}") # Don't stop, treat as text
+
+                # Try to identify HTML
+                if '<html' in content.lower() or '<body' in content.lower():
+                    try:
+                        from bs4 import BeautifulSoup
+                        soup = BeautifulSoup(content, 'html.parser')
+                        title = soup.title.string.strip() if soup.title and soup.title.string else f"HTML Content from {source}"
+                        # Try to get meaningful body text
+                        body_text = ""
+                        main_tags = soup.find_all(['main', 'article', 'div'], {'class': ['content', 'main', 'body', 'article']})
+                        if main_tags:
+                            body_text = " ".join(tag.get_text(" ", strip=True) for tag in main_tags)
+                        if not body_text and soup.body:
+                            body_text = soup.body.get_text(" ", strip=True)
+                        if not body_text:
+                             body_text = soup.get_text(" ", strip=True) # Fallback to all text
+
+                        print("Parsed content as HTML")
+                        return {
+                            'title': title,
+                            'description': body_text[:5000], # Limit length
+                            'source': source,
+                            'raw_data_type': 'html'
+                        }
+                    except ImportError:
+                        print("BeautifulSoup not installed, using basic HTML cleaning.")
+                        # Basic cleaning is likely already done, treat as text
+                    except Exception as html_e:
+                        print(f"HTML parsing failed (will treat as text): {html_e}") # Don't stop, treat as text
+
+
+                # Try parsing as JSON (if it looks like it)
+                if (content_strip.startswith('{') and content_strip.endswith('}')) or \
+                   (content_strip.startswith('[') and content_strip.endswith(']')):
+                    try:
+                        parsed = json.loads(content_strip)
+                        if isinstance(parsed, dict):
+                            parsed['source'] = source
+                            print("Parsed content as JSON object")
+                            return parsed
+                        elif isinstance(parsed, list) and parsed:
+                             # If list of dicts, maybe take the first? Or try to merge? For now, wrap it.
+                             print("Parsed content as JSON list, wrapping.")
+                             return {'title': f"List data from {source}", 'data_list': parsed, 'source': source, 'raw_data_type': 'json_list'}
+                        # else: Fall through if empty list or non-dict/list JSON
+
+                    except json.JSONDecodeError:
+                        print("Content looks like JSON but failed to parse (will treat as text).")
+
+
+                # If none of the above, treat as plain text
+                print("Treating content as plain text.")
+                return {
+                    'title': f"Tender Text from {source}",
+                    'description': content_strip[:5000], # Limit length
+                    'source': source,
+                    'raw_data_type': 'text'
+                }
+
+            # --- Handle Dict Content ---
+            elif isinstance(content, dict):
+                # Already a dictionary, just ensure source is set
+                if 'source' not in content:
+                    content['source'] = source
+                print("Content is already a dictionary.")
+                return content
+
+            # --- Handle List Content ---
+            elif isinstance(content, list):
+                print("Content is a list.")
+                if len(content) == 1 and isinstance(content[0], dict):
+                     print("Using first item from list as it's a dict.")
+                     item_dict = content[0]
+                     if 'source' not in item_dict: item_dict['source'] = source
+                     return item_dict
+                elif content:
+                     print("Wrapping list content.")
+                     return {'title': f"List data from {source}", 'data_list': content, 'source': source, 'raw_data_type': 'list'}
+                else:
+                     print("Content is an empty list.")
+                     return {'title': f"Empty List from {source}", 'source': source, 'description': ''} # Return minimal valid dict
+
+            # --- Handle Other Types ---
+            else:
+                print(f"Content is an unsupported type: {type(content)}. Converting to string.")
+                return {
+                    'title': f"Data from {source}",
+                    'description': str(content)[:5000],
+                    'source': source,
+                    'raw_data_type': type(content).__name__
+                }
+
+        except Exception as e:
+            print(f"Error in _extract_structured_data: {e}")
+            # Return a minimal structure indicating error
+            return {
+                'title': f"Error Processing Tender from {source}",
+                'description': f"Failed to process content. Error: {e}",
+                'source': source,
+                'processing_error': True
+            }
+
+    def _xml_to_dict(self, element):
+        """ Converts an XML element and its children into a dictionary. """
+        d = {element.tag: {} if element.attrib else None}
+        children = list(element)
+        if children:
+            dd = {}
+            for dc in map(self._xml_to_dict, children):
+                for k, v in dc.items():
+                    if k in dd:
+                        if not isinstance(dd[k], list):
+                            dd[k] = [dd[k]]
+                        dd[k].append(v)
+                    else:
+                        dd[k] = v
+            d = {element.tag: dd}
+        if element.attrib:
+            d[element.tag].update(('@' + k, v) for k, v in element.attrib.items())
+        if element.text:
+            text = element.text.strip()
+            if children or element.attrib:
+                if text:
+                  d[element.tag]['#text'] = text
+            else:
+                d[element.tag] = text
+        return d
