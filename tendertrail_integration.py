@@ -30,7 +30,7 @@ class TenderTrailIntegration:
         if supabase_url and supabase_key:
             try:
                 from supabase import create_client
-                self.supabase = create_client(supabase_url, supabase_key)
+        self.supabase = create_client(supabase_url, supabase_key)
                 print("Successfully initialized Supabase client")
             except ImportError:
                 print("Supabase client not found. Install with: pip install supabase")
@@ -87,7 +87,7 @@ class TenderTrailIntegration:
             
             # Insert all normalized tenders into the database
             inserted_count = 0
-            error_count = 0
+        error_count = 0
             
             if normalized_tenders:
                 # Insert the normalized tenders
@@ -167,8 +167,8 @@ class TenderTrailIntegration:
                 print(f"Could not preview first tender: {preview_e}")
             
             return self.process_source(tenders, source_name)
-            
-        except Exception as e:
+                
+            except Exception as e:
             print(f"Error processing JSON data for source {source_name}: {e}")
             traceback.print_exc()
             return 0, 0
@@ -277,157 +277,45 @@ class TenderTrailIntegration:
         # Fall back to default
         return default_id
     
-    async def _get_source_schema(self, source_name):
+    async def _get_source_schema(self, source_name=None):
         """
-        Get the schema for a source. 
-        First tries to retrieve from database, then falls back to defaults.
+        Get the schema for a source from the database or return a default schema.
         
         Args:
-            source_name: Name of the source
+            source_name: The name of the source
             
         Returns:
-            Dictionary representing the source schema
+            The schema for the source
         """
-        print(f"DEBUG: Calling _get_source_schema with source_name='{source_name}'")
-        loop = asyncio.get_event_loop()
-        
         if not source_name:
-            print("DEBUG: source_name is None or empty, using default schema")
-            return self._get_default_source_schema()
-            
+            print("No source name provided, using default schema")
+            return self._get_default_source_schema(None)
+        
+        # Try to get the schema from the database
         try:
-            # Try to get schema from database using run_in_executor
-            response = await loop.run_in_executor(
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
                 None,
-                lambda: self.supabase.table('source_schemas').select('schema').eq('name', source_name).limit(1).execute()
+                lambda: self.supabase.table('source_schemas')
+                          .select('schema')
+                          .eq('name', source_name)
+                          .execute()
             )
             
-            if hasattr(response, 'data') and response.data and len(response.data) > 0:
-                schema = response.data[0].get('schema')
-                if schema:
-                    print(f"DEBUG: Found schema for '{source_name}' in database.")
-                    if isinstance(schema, str):
-                        return json.loads(schema)
-                    elif isinstance(schema, dict):
-                        return schema
+            if result and hasattr(result, 'data') and result.data and len(result.data) > 0:
+                print(f"DEBUG: Found schema for '{source_name}' in database.")
+                db_schema = result.data[0]['schema']
+                
+                # Wrap the schema in a 'fields' key for compatibility with TenderPreprocessor
+                # The TenderPreprocessor expects: {'fields': {field1: {...}, field2: {...}, ...}}
+                schema = {'fields': db_schema}
+                return schema
         except Exception as e:
-            print(f"Error retrieving source schema from database: {e}")
-            
-        # Fallback to defaults based on source name
-        print(f"Using default schema for source: {source_name}")
+            print(f"Error getting schema for '{source_name}' from database: {e}")
         
-        # Common field mappings for default schema
-        common_mappings = {
-            "title": {"type": "string", "maps_to": "title"},
-            "description": {"type": "string", "maps_to": "description"},
-            "notice_title": {"type": "string", "maps_to": "title"},
-            "notice_id": {"type": "string", "maps_to": "raw_id"},
-            "source": {"type": "string", "maps_to": "source"},
-            "date_published": {"type": "date", "maps_to": "date_published"},
-            "closing_date": {"type": "date", "maps_to": "closing_date"},
-            "tender_value": {"type": "monetary", "maps_to": "tender_value"},
-            "currency": {"type": "string", "maps_to": "tender_currency"},
-            "country": {"type": "string", "maps_to": "location"},
-            "location": {"type": "string", "maps_to": "location"},
-            "issuing_authority": {"type": "string", "maps_to": "issuing_authority"},
-            "notice_type": {"type": "string", "maps_to": "tender_type"},
-            "organization": {"type": "string", "maps_to": "issuing_authority"}
-        }
-        
-        # Source-specific default schemas
-        if source_name == "adb":
-            schema = {
-                "source_name": "adb",
-                "fields": {
-                    "title": common_mappings["title"],
-                    "description": common_mappings["description"],
-                    "published_date": {"type": "date", "maps_to": "date_published"},
-                    "deadline": {"type": "date", "maps_to": "closing_date"},
-                    "budget": {"type": "monetary", "maps_to": "tender_value"},
-                    "location": common_mappings["location"],
-                    "authority": {"type": "string", "maps_to": "issuing_authority"}
-                },
-                "language": "en"
-            }
-        elif source_name == "wb" or source_name == "worldbank":
-            schema = {
-                "source_name": "wb",
-                "fields": {
-                    "title": common_mappings["title"],
-                    "description": common_mappings["description"],
-                    "publication_date": {"type": "date", "maps_to": "date_published"},
-                    "closing_date": {"type": "date", "maps_to": "closing_date"},
-                    "value": {"type": "monetary", "maps_to": "tender_value"},
-                    "country": {"type": "string", "maps_to": "location"},
-                    "borrower": {"type": "string", "maps_to": "issuing_authority"}
-                },
-                "language": "en"
-            }
-        elif source_name == "ungm":
-            schema = {
-                "source_name": "ungm",
-                "fields": {
-                    "title": common_mappings["title"],
-                    "description": common_mappings["description"],
-                    "published": {"type": "date", "maps_to": "date_published"},
-                    "deadline": {"type": "date", "maps_to": "closing_date"},
-                    "value": {"type": "monetary", "maps_to": "tender_value"},
-                    "country": {"type": "string", "maps_to": "location"},
-                    "agency": {"type": "string", "maps_to": "issuing_authority"}
-                },
-                "language": "en"
-            }
-        elif source_name == "ted_eu":
-            schema = {
-                "source_name": "ted_eu",
-                "fields": {
-                    "title": common_mappings["title"],
-                    "description": common_mappings["description"],
-                    "publicationDate": {"type": "date", "maps_to": "date_published"},
-                    "submissionDeadline": {"type": "date", "maps_to": "closing_date"},
-                    "estimatedValue": {"type": "monetary", "maps_to": "tender_value"},
-                    "country": {"type": "string", "maps_to": "location"},
-                    "contractingAuthority": {"type": "string", "maps_to": "issuing_authority"},
-                    "procedureType": {"type": "string", "maps_to": "tender_type"},
-                    "cpvCodes": {"type": "array", "maps_to": "keywords"}
-                },
-                "language": "en"
-            }
-        elif source_name == "sam_gov":
-            schema = {
-                "source_name": "sam_gov",
-                "fields": {
-                    "title": common_mappings["title"],
-                    "description": common_mappings["description"],
-                    "posted_date": {"type": "date", "maps_to": "date_published"},
-                    "response_deadline": {"type": "date", "maps_to": "closing_date"},
-                    "estimated_value": {"type": "monetary", "maps_to": "tender_value"},
-                    "place_of_performance": {"type": "string", "maps_to": "location"},
-                    "agency": {"type": "string", "maps_to": "issuing_authority"},
-                    "notice_type": {"type": "string", "maps_to": "tender_type"},
-                    "solicitation_number": {"type": "string", "maps_to": "raw_id"}
-                },
-                "language": "en"
-            }
-        else:
-            # Generic schema for any other source
-            schema = {
-                "source_name": source_name,
-                "fields": {
-                    "title": common_mappings["title"],
-                    "description": common_mappings["description"],
-                    "date_published": {"type": "date", "maps_to": "date_published"},
-                    "closing_date": {"type": "date", "maps_to": "closing_date"},
-                    "tender_value": {"type": "monetary", "maps_to": "tender_value"},
-                    "location": {"type": "string", "maps_to": "location"},
-                    "issuing_authority": {"type": "string", "maps_to": "issuing_authority"},
-                    "notice_type": {"type": "string", "maps_to": "tender_type"},
-                    "notice_id": {"type": "string", "maps_to": "raw_id"}
-                },
-                "language": "en"
-            }
-            
-        return schema
+        # If we get here, either the database query failed or no schema was found
+        print(f"No schema found for '{source_name}', using default schema")
+        return self._get_default_source_schema(source_name)
     
     async def _get_target_schema(self):
         """
@@ -456,7 +344,7 @@ class TenderTrailIntegration:
                         return schema
         except Exception as e:
             print(f"Error retrieving target schema from database: {e}")
-            
+    
         # Fallback to default schema
         print("Using default target schema")
         return {
@@ -557,7 +445,7 @@ class TenderTrailIntegration:
                                 )
                                 
                                 print("Successfully added default schema to target_schema")
-                            except Exception as e:
+        except Exception as e:
                                 print(f"Error adding default schema: {e}")
                         
                         return
@@ -738,7 +626,7 @@ class TenderTrailIntegration:
                 # Add the item as-is and let process_source handle it
                 processed_tenders.append(item)
                 
-            except Exception as e:
+        except Exception as e:
                 print(f"Error processing raw tender item: {e}")
                 # Add the raw item anyway, we'll try to handle it in process_source
                 processed_tenders.append(item)
@@ -2047,3 +1935,131 @@ class TenderTrailIntegration:
             
         # Use _parse_date for other formats
         return self._parse_date(date_input)
+
+    def _get_default_source_schema(self, source_name=None):
+        """
+        Get a default schema for a source when no schema is found in the database.
+        
+        Args:
+            source_name: The name of the source
+            
+        Returns:
+            A default schema for the source
+        """
+        # Common field mappings for default schema
+        common_mappings = {
+            "title": {"type": "string", "maps_to": "title"},
+            "description": {"type": "string", "maps_to": "description"},
+            "notice_title": {"type": "string", "maps_to": "title"},
+            "notice_id": {"type": "string", "maps_to": "raw_id"},
+            "source": {"type": "string", "maps_to": "source"},
+            "date_published": {"type": "date", "maps_to": "date_published"},
+            "publication_date": {"type": "date", "maps_to": "date_published"},
+            "closing_date": {"type": "date", "maps_to": "closing_date"},
+            "deadline": {"type": "date", "maps_to": "closing_date"},
+            "due_date": {"type": "date", "maps_to": "closing_date"},
+            "tender_value": {"type": "monetary", "maps_to": "tender_value"},
+            "currency": {"type": "string", "maps_to": "tender_currency"},
+            "country": {"type": "string", "maps_to": "location"},
+            "location": {"type": "string", "maps_to": "location"},
+            "issuing_authority": {"type": "string", "maps_to": "issuing_authority"},
+            "notice_type": {"type": "string", "maps_to": "tender_type"},
+            "tender_type": {"type": "string", "maps_to": "tender_type"},
+            "organization": {"type": "string", "maps_to": "issuing_authority"}
+        }
+        
+        # Source-specific default schemas
+        if source_name == "adb":
+            fields = {
+                "title": common_mappings["title"],
+                "description": common_mappings["description"],
+                "published_date": {"type": "date", "maps_to": "date_published"},
+                "deadline": {"type": "date", "maps_to": "closing_date"},
+                "budget": {"type": "monetary", "maps_to": "tender_value"},
+                "location": common_mappings["location"],
+                "authority": {"type": "string", "maps_to": "issuing_authority"},
+                "notice_title": common_mappings["notice_title"],
+                "publication_date": common_mappings["publication_date"],
+                "due_date": common_mappings["due_date"]
+            }
+        elif source_name == "wb" or source_name == "worldbank":
+            fields = {
+                "title": common_mappings["title"],
+                "description": common_mappings["description"],
+                "publication_date": {"type": "date", "maps_to": "date_published"},
+                "closing_date": {"type": "date", "maps_to": "closing_date"},
+                "value": {"type": "monetary", "maps_to": "tender_value"},
+                "country": {"type": "string", "maps_to": "location"},
+                "borrower": {"type": "string", "maps_to": "issuing_authority"}
+            }
+        elif source_name == "ungm":
+            fields = {
+                "title": common_mappings["title"],
+                "description": common_mappings["description"],
+                "published": {"type": "date", "maps_to": "date_published"},
+                "deadline": {"type": "date", "maps_to": "closing_date"},
+                "value": {"type": "monetary", "maps_to": "tender_value"},
+                "country": {"type": "string", "maps_to": "location"},
+                "agency": {"type": "string", "maps_to": "issuing_authority"}
+            }
+        elif source_name == "ted_eu":
+            fields = {
+                "title": common_mappings["title"],
+                "description": common_mappings["description"],
+                "publicationDate": {"type": "date", "maps_to": "date_published"},
+                "submissionDeadline": {"type": "date", "maps_to": "closing_date"},
+                "estimatedValue": {"type": "monetary", "maps_to": "tender_value"},
+                "country": {"type": "string", "maps_to": "location"},
+                "contractingAuthority": {"type": "string", "maps_to": "issuing_authority"},
+                "procedureType": {"type": "string", "maps_to": "tender_type"},
+                "cpvCodes": {"type": "array", "maps_to": "keywords"}
+            }
+        elif source_name == "sam_gov":
+            fields = {
+                "title": common_mappings["title"],
+                "description": common_mappings["description"],
+                "posted_date": {"type": "date", "maps_to": "date_published"},
+                "response_deadline": {"type": "date", "maps_to": "closing_date"},
+                "estimated_value": {"type": "monetary", "maps_to": "tender_value"},
+                "place_of_performance": {"type": "string", "maps_to": "location"},
+                "agency": {"type": "string", "maps_to": "issuing_authority"},
+                "notice_type": {"type": "string", "maps_to": "tender_type"},
+                "solicitation_number": {"type": "string", "maps_to": "raw_id"}
+            }
+        elif source_name == "afdb":
+            fields = {
+                "title": common_mappings["title"],
+                "description": common_mappings["description"],
+                "publication_date": common_mappings["publication_date"],
+                "closing_date": common_mappings["closing_date"],
+                "estimated_value": {"type": "monetary", "maps_to": "tender_value"},
+                "currency": common_mappings["currency"],
+                "country": common_mappings["country"],
+                "tender_type": common_mappings["tender_type"],
+                "sector": {"type": "string", "maps_to": "sector"}
+            }
+        else:
+            # Generic schema for any other source
+            fields = {
+                "title": common_mappings["title"],
+                "description": common_mappings["description"],
+                "date_published": {"type": "date", "maps_to": "date_published"},
+                "publication_date": {"type": "date", "maps_to": "date_published"},
+                "closing_date": {"type": "date", "maps_to": "closing_date"},
+                "tender_value": {"type": "monetary", "maps_to": "tender_value"},
+                "location": {"type": "string", "maps_to": "location"},
+                "country": {"type": "string", "maps_to": "location"},
+                "issuing_authority": {"type": "string", "maps_to": "issuing_authority"},
+                "notice_type": {"type": "string", "maps_to": "tender_type"},
+                "tender_type": {"type": "string", "maps_to": "tender_type"},
+                "notice_id": {"type": "string", "maps_to": "raw_id"}
+            }
+        
+        # Return schema with proper structure
+        schema = {
+            "source_name": source_name or "generic",
+            "language": "en",
+            "fields": fields
+        }
+        
+        return schema

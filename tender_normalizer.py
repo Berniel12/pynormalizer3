@@ -468,12 +468,20 @@ IMPORTANT INSTRUCTION ABOUT JSON OUTPUT:
 6. DO NOT include any explanation text outside the JSON object.
 7. Your entire response must be a single valid parseable JSON object.
 
+IMPORTANT DATE HANDLING INSTRUCTIONS:
+1. All date fields (date_published, closing_date, etc.) MUST be in ISO 8601 format: YYYY-MM-DD or YYYY-MM-DDThh:mm:ssZ
+2. NEVER return "Unknown" for date fields. If a date is missing or cannot be determined:
+   - Look for date information in the title, description, or other fields
+   - If still no date is found, default to the current year and month with a logical day (e.g., "2025-03-01")
+   - As a last resort, use the string "2025-01-01" as a placeholder, BUT NEVER use "Unknown"
+
 Example of valid response format:
 ```json
 {
   "title": "Example tender title",
   "description": "This is a \"quoted\" description with properly escaped quotes.",
-  "date_published": "2023-04-15"
+  "date_published": "2025-04-15",
+  "closing_date": "2025-06-30"
 }
 ```"""
             }
