@@ -354,17 +354,12 @@ class LLMProviderFactory:
     
     @staticmethod
     def create_provider(provider_type: str, api_key: str, model: Optional[str] = None) -> LLMProvider:
-        """Create an LLM provider of the specified type."""
-        if provider_type.lower() == "openai":
-            return OpenAIProvider(api_key, model or "gpt-3.5-turbo")
-        elif provider_type.lower() == "gpt4o-mini":
-            return GPT4oMiniProvider(api_key)
-        elif provider_type.lower() == "cohere":
-            return CohereProvider(api_key, model or "command")
-        elif provider_type.lower() == "mistral":
-            return MistralProvider(api_key, model or "mistral-small")
-        else:
-            raise ValueError(f"Unsupported provider type: {provider_type}")
+        """Create an LLM provider. 
+        NOTE: This factory is currently hardcoded to ALWAYS return GPT4oMiniProvider.
+        """
+        print(f"INFO: LLM Provider Factory called with type '{provider_type}'. Forcing GPT-4o Mini.")
+        # Always return GPT4oMiniProvider, ignore provider_type and model arguments
+        return GPT4oMiniProvider(api_key)
 
 class TenderNormalizer:
     """Main class for normalizing tender data using LLMs."""
