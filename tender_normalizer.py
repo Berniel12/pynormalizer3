@@ -91,7 +91,7 @@ Extracted data (JSON format):"""
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.3,
-            "max_tokens": 1000
+            "max_tokens": 4096
         }
         
         try:
