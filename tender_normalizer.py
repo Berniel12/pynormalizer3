@@ -97,14 +97,37 @@ Extracted data (JSON format):"""
         try:
             # Add a timeout (in seconds)
             timeout_seconds = 120 
+            print(f"DEBUG [_call_api OpenAI]: Sending request to {self.base_url} with timeout {timeout_seconds}s...") # Log before request
             response = requests.post(self.base_url, headers=self.headers, json=payload, timeout=timeout_seconds)
+            print(f"DEBUG [_call_api OpenAI]: Request finished. Status code: {response.status_code}") # Log after request
             response.raise_for_status()
-            return response.json()["choices"][0]["message"]["content"]
+            print(f"DEBUG [_call_api OpenAI]: Parsing response JSON...") # Log before parsing
+            content = response.json()["choices"][0]["message"]["content"]
+            print(f"DEBUG [_call_api OpenAI]: Response parsed successfully.") # Log after parsing
+            return content
         except requests.exceptions.Timeout:
-            print(f"Error calling OpenAI API: Request timed out after {timeout_seconds} seconds.")
+            print(f"ERROR calling OpenAI API: Request timed out after {timeout_seconds} seconds.")
             return ""
+        except requests.exceptions.RequestException as req_e:
+             print(f"ERROR calling OpenAI API: RequestException: {req_e}")
+             # Log response details if available
+             if hasattr(req_e, 'response') and req_e.response is not None:
+                 print(f"Response status: {req_e.response.status_code}")
+                 try:
+                     print(f"Response text: {req_e.response.text[:500]}...") # Log beginning of response text
+                 except Exception as log_e:
+                     print(f"Could not log response text: {log_e}")
+             return ""
         except Exception as e:
-            print(f"Error calling OpenAI API: {e}")
+            # Catch other potential errors like JSON parsing issues after successful request
+            print(f"ERROR calling OpenAI API or processing response: {e}")
+            # Also log response status/text if available and not already logged by RequestException
+            if 'response' in locals() and response is not None:
+                 print(f"Response status during error: {response.status_code}")
+                 try:
+                     print(f"Response text during error: {response.text[:500]}...")
+                 except Exception as log_e:
+                     print(f"Could not log response text during error: {log_e}")
             return ""
 
 class GPT4oMiniProvider(LLMProvider):
@@ -181,14 +204,37 @@ Extracted data (JSON format):"""
         try:
             # Add a timeout (in seconds)
             timeout_seconds = 120 
+            print(f"DEBUG [_call_api GPT4oMini]: Sending request to {self.base_url} with timeout {timeout_seconds}s...") # Log before request
             response = requests.post(self.base_url, headers=self.headers, json=payload, timeout=timeout_seconds)
+            print(f"DEBUG [_call_api GPT4oMini]: Request finished. Status code: {response.status_code}") # Log after request
             response.raise_for_status()
-            return response.json()["choices"][0]["message"]["content"]
+            print(f"DEBUG [_call_api GPT4oMini]: Parsing response JSON...") # Log before parsing
+            content = response.json()["choices"][0]["message"]["content"]
+            print(f"DEBUG [_call_api GPT4oMini]: Response parsed successfully.") # Log after parsing
+            return content
         except requests.exceptions.Timeout:
-            print(f"Error calling OpenAI API (GPT-4o Mini): Request timed out after {timeout_seconds} seconds.")
+            print(f"ERROR calling OpenAI API (GPT-4o Mini): Request timed out after {timeout_seconds} seconds.")
             return ""
+        except requests.exceptions.RequestException as req_e:
+             print(f"ERROR calling OpenAI API (GPT-4o Mini): RequestException: {req_e}")
+             # Log response details if available
+             if hasattr(req_e, 'response') and req_e.response is not None:
+                 print(f"Response status: {req_e.response.status_code}")
+                 try:
+                     print(f"Response text: {req_e.response.text[:500]}...") # Log beginning of response text
+                 except Exception as log_e:
+                     print(f"Could not log response text: {log_e}")
+             return ""
         except Exception as e:
-            print(f"Error calling OpenAI API (GPT-4o Mini): {e}")
+            # Catch other potential errors like JSON parsing issues after successful request
+            print(f"ERROR calling OpenAI API (GPT-4o Mini) or processing response: {e}")
+            # Also log response status/text if available and not already logged by RequestException
+            if 'response' in locals() and response is not None:
+                 print(f"Response status during error: {response.status_code}")
+                 try:
+                     print(f"Response text during error: {response.text[:500]}...")
+                 except Exception as log_e:
+                     print(f"Could not log response text during error: {log_e}")
             return ""
 
 class CohereProvider(LLMProvider):
