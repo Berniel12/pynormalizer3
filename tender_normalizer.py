@@ -359,7 +359,7 @@ class LLMProviderFactory:
         """
         print(f"INFO: LLM Provider Factory called with type '{provider_type}'. Forcing GPT-4o Mini.")
         # Always return GPT4oMiniProvider, ignore provider_type and model arguments
-        return GPT4oMiniProvider(api_key)
+            return GPT4oMiniProvider(api_key)
 
 class TenderNormalizer:
     """Main class for normalizing tender data using LLMs."""
@@ -388,58 +388,64 @@ class TenderNormalizer:
         Returns:
             Normalized tender data
         """
+        # Type checking and default values
+        tender_data = tender_data if isinstance(tender_data, dict) else {}
+        source_schema = source_schema if isinstance(source_schema, dict) else {}
+        target_schema = target_schema if isinstance(target_schema, dict) else {}
+
+        print(f"DEBUG [normalize_tender]: Starting for tender ID (from data): {tender_data.get('id', 'N/A')}")
+
         try:
-            # Debug logging
-            print(f"DEBUG: Normalizing tender with keys: {list(tender_data.keys()) if isinstance(tender_data, dict) else type(tender_data)}")
-            
-            # Validate input types
-            if not isinstance(tender_data, dict):
-                print(f"ERROR: tender_data is not a dictionary: {type(tender_data)}")
-                return None
-                
-            # Validate source_schema if provided
-            if source_schema is not None and not isinstance(source_schema, dict):
-                print(f"WARNING: source_schema is not a dictionary: {type(source_schema)}")
-                source_schema = {}  # Use empty dict as fallback
-                
-            # Validate target_schema if provided
-            if target_schema is not None and not isinstance(target_schema, dict):
-                print(f"WARNING: target_schema is not a dictionary: {type(target_schema)}")
-                target_schema = {}  # Use empty dict as fallback
-            
-            # Construct messages for the LLM
+            # Step 1: Construct messages for the LLM
+            print(f"DEBUG [normalize_tender]: Constructing messages...")
             messages = self._construct_messages(tender_data, source_schema, target_schema)
-            
-            # Cache key for this request
+            if not messages:
+                print("ERROR [normalize_tender]: Failed to construct messages.")
+                return None # Cannot proceed without messages
+            print(f"DEBUG [normalize_tender]: Messages constructed.")
+
+            # Step 2: Generate cache key
+            print(f"DEBUG [normalize_tender]: Generating cache key...")
             cache_key = self._generate_cache_key(tender_data, messages)
-            
-            # Check cache first
+            print(f"DEBUG [normalize_tender]: Cache key generated: {cache_key}")
+
+            # Step 3: Check cache
+            print(f"DEBUG [normalize_tender]: Checking cache...")
             cached_response = self._check_cache(cache_key)
             if cached_response:
-                print("DEBUG: Using cached response")
+                print(f"DEBUG [normalize_tender]: Cache hit! Returning cached response.")
                 return cached_response
-                
-            # Call the LLM API
+            print(f"DEBUG [normalize_tender]: Cache miss.")
+
+            # Step 4: Call the LLM API (if not cached)
+            print(f"DEBUG [normalize_tender]: Calling API...")
             completion = self._call_api(messages)
+            print(f"DEBUG [normalize_tender]: API call completed.") # Log added here
             
-            # If we have an error, return None
-            if not completion or 'error' in completion:
-                print(f"Error in LLM API call: {completion.get('error', 'Unknown error') if isinstance(completion, dict) else 'No completion'}")
+            if completion is None:
+                print("ERROR [normalize_tender]: API call failed or returned None.")
                 return None
-                
-            # Parse and validate the response
+
+            # Step 5: Parse the response
+            print(f"DEBUG [normalize_tender]: Parsing response...")
             normalized_tender = self._parse_response(completion)
-            
-            # Cache the result if valid
-            if normalized_tender and isinstance(normalized_tender, dict):
+            print(f"DEBUG [normalize_tender]: Response parsing finished.")
+
+            # Step 6: Update cache
+            if normalized_tender:
+                print(f"DEBUG [normalize_tender]: Updating cache...")
                 self._update_cache(cache_key, normalized_tender)
-            
+                print(f"DEBUG [normalize_tender]: Cache updated.")
+            else:
+                print("WARN [normalize_tender]: Parsing failed, cache not updated.")
+
+            print(f"DEBUG [normalize_tender]: Finished for tender ID: {tender_data.get('id', 'N/A')}")
             return normalized_tender
-            
+
         except Exception as e:
+            print(f"CRITICAL ERROR in normalize_tender for ID {tender_data.get('id', 'N/A')}: {e}")
             import traceback
-            print(f"Error in normalize_tender: {e}")
-            traceback.print_exc()
+            traceback.print_exc() # Print detailed traceback
             return None
             
     def _construct_messages(self, tender_data: Dict[str, Any], source_schema: Dict[str, Any] = None, target_schema: Dict[str, Any] = None) -> List[Dict[str, str]]:
