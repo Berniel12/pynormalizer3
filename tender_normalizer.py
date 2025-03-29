@@ -790,6 +790,7 @@ Return ONLY the JSON object with the normalized data."""
             The response from the LLM API
         """
         try:
+            print(f"DEBUG [TenderNormalizer._call_api]: Delegating API call to provider {type(self.provider).__name__}") # Log before delegation
             # Use the provider's API call method if it supports message format
             if hasattr(self.provider, '_call_api') and callable(getattr(self.provider, '_call_api')):
                 system_message = messages[0]['content'] if messages and messages[0]['role'] == 'system' else ""
@@ -797,10 +798,14 @@ Return ONLY the JSON object with the normalized data."""
                 
                 # Combine system and user messages if needed
                 prompt = f"{system_message}\n\n{user_message}" if system_message else user_message
-                return self.provider._call_api(prompt)
+                # Log the actual call to the provider
+                print(f"DEBUG [TenderNormalizer._call_api]: Calling {type(self.provider).__name__}._call_api(prompt)")
+                result = self.provider._call_api(prompt)
+                print(f"DEBUG [TenderNormalizer._call_api]: Call to {type(self.provider).__name__}._call_api returned.") # Log after delegation returns
+                return result
             else:
                 # Fallback for providers without direct message support
-                print("Provider does not support direct API calls, using extract_structured_data instead")
+                print("WARN [TenderNormalizer._call_api]: Provider does not support direct API calls, using extract_structured_data instead")
                 # Extract schema from messages
                 schema = {}
                 for msg in messages:
@@ -822,10 +827,16 @@ Return ONLY the JSON object with the normalized data."""
                         break
                 
                 # Use extract_structured_data as fallback
-                return self.provider.extract_structured_data(tender_text, schema or {})
+                print(f"DEBUG [TenderNormalizer._call_api]: Calling {type(self.provider).__name__}.extract_structured_data")
+                result = self.provider.extract_structured_data(tender_text, schema or {})
+                print(f"DEBUG [TenderNormalizer._call_api]: Call to {type(self.provider).__name__}.extract_structured_data returned.")
+                return result
         except Exception as e:
-            print(f"Error calling LLM API: {e}")
-            return {"error": str(e)}
+            print(f"CRITICAL ERROR in TenderNormalizer._call_api: {e}")
+            import traceback
+            traceback.print_exc()
+            # Return None or a dict indicating error, consistent with normalize_tender expectation
+            return None 
     
     def normalize_field(self, field_name: str, field_value: str, target_schema: Dict[str, Any]) -> str:
         """Normalize a field value according to the target schema."""
