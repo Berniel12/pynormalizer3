@@ -698,7 +698,7 @@ Your output must be a valid JSON object that follows the target schema exactly.
         except Exception as e:
             print(f"Error calling LLM API: {e}")
             return {"error": str(e)}
-
+    
     def normalize_field(self, field_name: str, field_value: str, target_schema: Dict[str, Any]) -> str:
         """Normalize a field value according to the target schema."""
         # Check cache first
