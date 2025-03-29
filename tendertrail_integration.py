@@ -15,13 +15,13 @@ class TenderTrailIntegration:
     
     def __init__(self, normalizer=None, preprocessor=None, supabase_url=None, supabase_key=None):
         """
-        Initialize the integration layer.
+        Initialize the TenderTrailIntegration class.
         
         Args:
-            normalizer: The TenderNormalizer instance (LLM-based)
-            preprocessor: The TenderPreprocessor instance 
-            supabase_url: Supabase URL
-            supabase_key: Supabase API key
+            normalizer: Instance of TenderNormalizer
+            preprocessor: Instance of TenderPreprocessor
+            supabase_url: URL for Supabase instance
+            supabase_key: API key for Supabase instance
         """
         self.normalizer = normalizer
         self.preprocessor = preprocessor
@@ -30,7 +30,7 @@ class TenderTrailIntegration:
         if supabase_url and supabase_key:
             try:
                 from supabase import create_client
-        self.supabase = create_client(supabase_url, supabase_key)
+                self.supabase = create_client(supabase_url, supabase_key)
                 print("Successfully initialized Supabase client")
             except ImportError:
                 print("Supabase client not found. Install with: pip install supabase")
@@ -38,6 +38,9 @@ class TenderTrailIntegration:
             except Exception as e:
                 print(f"Error initializing Supabase client: {e}")
                 raise
+        else:
+            print("Supabase URL or key not provided. Skipping Supabase client initialization.")
+            self.supabase = None # Ensure supabase is set to None if not initialized
         
         # Initialize translation cache
         self.translation_cache = {}
@@ -77,6 +80,11 @@ class TenderTrailIntegration:
         
         print(f"Processing {len(tenders) if isinstance(tenders, (list, tuple)) else 'unknown number of'} tenders from source: {source_name}")
         
+        processed_count = 0
+        error_count = 0
+        inserted_count = 0
+        normalized_tenders = []
+        
         try:
             # Store the current source name for use in normalization
             self._current_source = source_name
@@ -86,27 +94,28 @@ class TenderTrailIntegration:
             processed_count = len(normalized_tenders)
             
             # Insert all normalized tenders into the database
-            inserted_count = 0
-        error_count = 0
-            
             if normalized_tenders:
-                # Insert the normalized tenders
                 inserted_count = await self._insert_normalized_tenders(normalized_tenders, create_tables)
                 print(f"Inserted {inserted_count} tenders from source: {source_name}")
                 
-                # Calculate error count
+                # Calculate error count based on insertion success
                 error_count = processed_count - inserted_count
+            else:
+                print(f"No tenders were successfully normalized for source: {source_name}")
+                error_count = len(tenders) # All original tenders failed if none were normalized
             
-            # Clear the current source when done
-            self._current_source = None
-            
-            return processed_count, error_count
         except Exception as e:
             print(f"Error processing source {source_name}: {e}")
             traceback.print_exc()
-            # Clear the current source in case of error
+            error_count = len(tenders) # Assume all failed if main processing block crashed
+            processed_count = 0
+            inserted_count = 0
+            
+        finally:
+            # Clear the current source when done
             self._current_source = None
-            return 0, 0
+            
+        return processed_count, error_count
     
     def process_json_tenders(self, json_data, source_name):
         """
@@ -168,7 +177,7 @@ class TenderTrailIntegration:
             
             return self.process_source(tenders, source_name)
                 
-            except Exception as e:
+        except Exception as e: # Corrected indentation
             print(f"Error processing JSON data for source {source_name}: {e}")
             traceback.print_exc()
             return 0, 0
@@ -420,48 +429,49 @@ class TenderTrailIntegration:
         try:
             # Check if table already exists using simple query
             try:
-                try:
-                    # Try direct query using run_in_executor
-                    response = await loop.run_in_executor(
-                        None,
-                        lambda: self.supabase.table('target_schema').select('id').limit(1).execute()
-                    )
+                # Try direct query using run_in_executor
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: self.supabase.table('target_schema').select('id').limit(1).execute()
+                )
+                
+                if hasattr(response, 'data'):
+                    print("target_schema table already exists")
                     
-                    if hasattr(response, 'data'):
-                        print("target_schema table already exists")
-                        
-                        # If the table exists but is empty, try to populate it
-                        if not response.data:
-                            try:
-                                print("Adding default schema to empty target_schema table")
-                                default_schema = self._get_default_target_schema()
-                                
-                                # Insert using run_in_executor
-                                await loop.run_in_executor(
-                                    None,
-                                    lambda: self.supabase.table('target_schema').insert({
-                                        'schema': default_schema
-                                    }).execute()
-                                )
-                                
-                                print("Successfully added default schema to target_schema")
-        except Exception as e:
-                                print(f"Error adding default schema: {e}")
-                        
-                        return
-                except Exception as e:
-                    # If the error indicates the table doesn't exist, log it
-                    if "relation" in str(e) and "does not exist" in str(e):
-                        print(f"target_schema table doesn't exist, but may be created by another process")
-                    else:
-                        print(f"target_schema table check failed: {e}")
-            
+                    # If the table exists but is empty, try to populate it
+                    if not response.data:
+                        try:
+                            print("Adding default schema to empty target_schema table")
+                            default_schema = self._get_default_target_schema()
+                            
+                            # Insert using run_in_executor
+                            await loop.run_in_executor(
+                                None,
+                                lambda: self.supabase.table('target_schema').insert({
+                                    'schema': default_schema
+                                }).execute()
+                            )
+                            
+                            print("Successfully added default schema to target_schema")
+                        except Exception as e: # Corrected indentation for this except
+                            print(f"Error adding default schema: {e}")
+                    
+                    return # Exit if table exists (and potentially populated)
+                
             except Exception as e:
-                print(f"Error checking target_schema: {e}")
+                # If the error indicates the table doesn't exist, log it
+                if "relation" in str(e) and "does not exist" in str(e):
+                    print(f"target_schema table doesn't exist, proceeding to creation check (if applicable).")
+                else:
+                    # Log other errors encountered during the check
+                    print(f"Error checking target_schema existence: {e}")
+                    # Decide if we should stop or try to create. For now, let's proceed carefully.
             
-            # In API-only mode, we can't create tables directly
-            print("Cannot create target_schema table in API-only mode")
-            print("Please create the table using the Supabase UI or SQL Editor with this schema:")
+            # If check failed or table doesn't exist, attempt creation or notify user
+            # NOTE: Supabase client library typically cannot create tables directly.
+            # This block primarily serves to inform the user.
+            print("Cannot create target_schema table directly via client library.")
+            print("Please ensure the table exists or create it using the Supabase UI or SQL Editor with this schema:")
             print("""
             CREATE TABLE IF NOT EXISTS public.target_schema (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -471,11 +481,12 @@ class TenderTrailIntegration:
             );
             """)
             
-            # We'll continue with the in-memory default schema
-            print("Using in-memory default schema")
+            # We'll continue with the in-memory default schema if creation/check fails
+            print("Using in-memory default schema as fallback.")
+            
         except Exception as general_e:
             print(f"General error in _create_target_schema_table: {general_e}")
-            print("Continuing with in-memory schema")
+            print("Continuing with in-memory schema as fallback.")
     
     async def _get_raw_tenders(self, source_name: str, batch_size: int) -> List[Dict[str, Any]]:
         """Get raw tenders from the database for a source."""
@@ -626,7 +637,7 @@ class TenderTrailIntegration:
                 # Add the item as-is and let process_source handle it
                 processed_tenders.append(item)
                 
-        except Exception as e:
+            except Exception as e: # This except corresponds to the try block starting the loop iteration
                 print(f"Error processing raw tender item: {e}")
                 # Add the raw item anyway, we'll try to handle it in process_source
                 processed_tenders.append(item)
