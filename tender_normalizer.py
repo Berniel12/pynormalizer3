@@ -542,8 +542,9 @@ Return ONLY the JSON object with the normalized data."""
         try:
             # Debug logging
             print(f"DEBUG: Parsing LLM response type: {type(completion)}")
-            
+
             # Handle different response formats based on provider
+            content = None # Initialize content
             if isinstance(completion, dict):
                 # OpenAI API format
                 if 'choices' in completion and len(completion['choices']) > 0:
@@ -564,77 +565,105 @@ Return ONLY the JSON object with the normalized data."""
             else:
                 print(f"Unexpected completion type: {type(completion)}")
                 return None
-                
+
             if not content:
                 print("Empty content in LLM response")
                 return None
-                
+            
+            # --- Added Logging ---
+            print(f"DEBUG: Raw LLM content received (first 500 chars):\\n{content[:500]}")
+            # --- End Added Logging ---
+
             # Extract JSON from the response
             import json
             import re
 
-            # Attempt to strip markdown code fences first
             json_str = None
-            if content.strip().startswith("```json"):
-                json_str = content.strip()[7:].strip() # Remove ```json and surrounding whitespace
-                if json_str.endswith("```"):
-                    json_str = json_str[:-3].strip() # Remove trailing ``` and surrounding whitespace
-            elif content.strip().startswith("```"):
-                 json_str = content.strip()[3:].strip() # Remove ``` and surrounding whitespace
-                 if json_str.endswith("```"):
-                    json_str = json_str[:-3].strip() # Remove trailing ``` and surrounding whitespace
+            normalized_tender = None
 
-            # If stripping worked, try parsing directly
-            if json_str:
-                 try:
-                     normalized_tender = json.loads(json_str)
-                     if not isinstance(normalized_tender, dict):
-                         print(f"Parsed JSON from stripped content is not a dictionary: {type(normalized_tender)}")
+            try: # Wrap main parsing logic
+                # Attempt to strip markdown code fences first
+                if content.strip().startswith("```json"):
+                    json_str = content.strip()[7:].strip() # Remove ```json and surrounding whitespace
+                    if json_str.endswith("```"):
+                        json_str = json_str[:-3].strip() # Remove trailing ``` and surrounding whitespace
+                elif content.strip().startswith("```"):
+                     json_str = content.strip()[3:].strip() # Remove ``` and surrounding whitespace
+                     if json_str.endswith("```"):
+                        json_str = json_str[:-3].strip() # Remove trailing ``` and surrounding whitespace
+
+                # If stripping worked, try parsing directly
+                if json_str:
+                     try:
+                         normalized_tender = json.loads(json_str)
+                         if not isinstance(normalized_tender, dict):
+                             print(f"Parsed JSON from stripped content is not a dictionary: {type(normalized_tender)}")
+                             json_str = None # Mark as failed to allow regex fallback
+                             normalized_tender = None # Reset
+                         else:
+                             print("DEBUG: Successfully parsed JSON after stripping fences.")
+                             return normalized_tender # Success!
+                     except json.JSONDecodeError as e:
+                         print(f"DEBUG: Error decoding JSON after stripping fences: {e}")
+                         # --- Improved Logging ---
+                         print(f"DEBUG: Faulty JSON string (stripped) was: {json_str[:500]}...")
+                         # --- End Improved Logging ---
                          json_str = None # Mark as failed to allow regex fallback
-                     else:
-                         print("DEBUG: Successfully parsed JSON after stripping fences.")
-                         return normalized_tender # Success!
-                 except json.JSONDecodeError as e:
-                     print(f"DEBUG: Error decoding JSON after stripping fences: {e}")
-                     print(f"DEBUG: Stripped JSON string was: {json_str[:100]}...")
-                     json_str = None # Mark as failed to allow regex fallback
+                         normalized_tender = None # Reset
 
-            # If stripping didn't work or failed, fall back to regex
-            if not json_str:
-                print("DEBUG: Falling back to regex for JSON extraction.")
-                json_matches = re.findall(r'```(?:json)?\\s*([\\s\\S]*?)```', content)
+                # If stripping didn't work or failed, fall back to regex
+                if not normalized_tender: # Check if we already succeeded
+                    print("DEBUG: Falling back to regex/direct parsing for JSON extraction.")
+                    json_matches = re.findall(r'```(?:json)?\\s*([\\s\\S]*?)```', content)
 
-                if json_matches:
-                    # Use the first JSON block found
-                    json_str = json_matches[0].strip() # Add strip here too
-                else:
-                    # Try to find anything that looks like JSON
-                    if content.strip().startswith('{') and content.strip().endswith('}'):
-                        json_str = content.strip()
+                    if json_matches:
+                        # Use the first JSON block found
+                        json_str = json_matches[0].strip()
                     else:
-                        # One more attempt to extract just the JSON object
-                        json_match = re.search(r'({[\\s\\S]*})', content)
-                        if json_match:
-                            json_str = json_match.group(1).strip() # Add strip here
+                        # Try to find anything that looks like JSON
+                        if content.strip().startswith('{') and content.strip().endswith('}'):
+                            json_str = content.strip()
                         else:
-                            print(f"No JSON found in response (after regex): {content[:100]}...")
-                            return None
+                            # One more attempt to extract just the JSON object
+                            json_match = re.search(r'({[\\s\\S]*})', content)
+                            if json_match:
+                                json_str = json_match.group(1).strip()
+                            else:
+                                print(f"No JSON found in response (after regex/fallback): {content[:100]}...")
+                                return None # Give up if no JSON structure is found
 
-            # Parse the JSON found via regex or other fallbacks
-            try:
-                normalized_tender = json.loads(json_str)
-                if not isinstance(normalized_tender, dict):
-                    print(f"Parsed JSON from regex/fallback is not a dictionary: {type(normalized_tender)}")
-                    return None
-                print("DEBUG: Successfully parsed JSON using regex/fallback.")
-                return normalized_tender
-            except json.JSONDecodeError as e:
-                print(f"Error decoding JSON (from regex/fallback): {e}")
-                print(f"JSON string was: {json_str[:100]}...")
+                    # Parse the JSON found via regex or other fallbacks
+                    if json_str:
+                        try:
+                            normalized_tender = json.loads(json_str)
+                            if not isinstance(normalized_tender, dict):
+                                print(f"Parsed JSON from regex/fallback is not a dictionary: {type(normalized_tender)}")
+                                return None # Fail if it's not a dict
+                            print("DEBUG: Successfully parsed JSON using regex/fallback.")
+                            return normalized_tender # Success!
+                        except json.JSONDecodeError as e:
+                            print(f"Error decoding JSON (from regex/fallback): {e}")
+                             # --- Improved Logging ---
+                            print(f"DEBUG: Faulty JSON string (regex/fallback) was: {json_str[:500]}...")
+                             # --- End Improved Logging ---
+                            return None # Fail parsing
+                    else:
+                         print("DEBUG: Could not extract a JSON string using regex/fallback methods.")
+                         return None # Failed to extract any JSON string
+
+            # --- Refined Exception Handling ---
+            except json.JSONDecodeError as e: # Catch JSON errors specifically from the last attempt
+                print(f"FINAL PARSING ERROR: Failed to decode JSON. Error: {e}")
+                print(f"DEBUG: Final faulty JSON string attempted: {json_str[:500]}...")
                 return None
-                
-        except Exception as e:
-            print(f"Error parsing LLM response: {e}")
+            except Exception as e: # Catch any other unexpected errors during parsing
+                 print(f"UNEXPECTED PARSING ERROR: An error occurred during JSON extraction/parsing: {e}")
+                 print(f"DEBUG: Original raw content was: {content[:500]}...")
+                 return None
+            # --- End Refined Exception Handling ---
+
+        except Exception as e: # Catch errors *before* parsing starts (e.g., getting content)
+            print(f"Error preparing content for LLM response parsing: {e}")
             return None
             
     def _generate_cache_key(self, tender_data: Dict[str, Any], messages: List[Dict[str, str]]) -> str:

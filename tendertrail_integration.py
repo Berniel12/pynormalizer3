@@ -30,16 +30,18 @@ class TenderTrailIntegration:
         if supabase_url and supabase_key:
             try:
                 from supabase import create_client
-                self.supabase = create_client(supabase_url, supabase_key)
-                print("Successfully initialized Supabase client")
-            except ImportError:
-                print("Supabase client not found. Install with: pip install supabase")
-                raise
-            except Exception as e:
+                self.supabase = create_client(supabase_url, supabase_key) # Moved inside try
+                print("Successfully initialized Supabase client") # Moved inside try
+            except ImportError: # Correctly aligned with try
+                print("Supabase client library not found. Run: pip install supabase")
+                print("Disabling Supabase functionality.")
+                self.supabase = None # Set to None on import error
+            except Exception as e: # Correctly aligned with try
                 print(f"Error initializing Supabase client: {e}")
-                raise
+                print("Disabling Supabase functionality.")
+                self.supabase = None # Set to None on other init errors
         else:
-            print("Supabase URL or key not provided. Skipping Supabase client initialization.")
+            print("Supabase URL or key not provided. Disabling Supabase functionality.")
             self.supabase = None # Ensure supabase is set to None if not initialized
         
         # Initialize translation cache
@@ -103,9 +105,10 @@ class TenderTrailIntegration:
             else:
                 print(f"No tenders were successfully normalized for source: {source_name}")
                 error_count = len(tenders) # All original tenders failed if none were normalized
-            
-        except Exception as e:
-            print(f"Error processing source {source_name}: {e}")
+                
+        # Correctly aligned and structured except block
+        except Exception as e: 
+            print(f"Error processing source {source_name}: {e}") 
             traceback.print_exc()
             error_count = len(tenders) # Assume all failed if main processing block crashed
             processed_count = 0
@@ -324,7 +327,8 @@ class TenderTrailIntegration:
         
         # If we get here, either the database query failed or no schema was found
         print(f"No schema found for '{source_name}', using default schema")
-        return self._get_default_source_schema(source_name)
+        # Correctly indented return statement
+        return self._get_default_source_schema(source_name) 
     
     async def _get_target_schema(self):
         """
@@ -426,9 +430,9 @@ class TenderTrailIntegration:
         """Create target_schema table if it doesn't exist and insert default schema."""
         loop = asyncio.get_event_loop()
         
-        try:
+        try: # Outer try
             # Check if table already exists using simple query
-            try:
+            try: # Inner try block
                 # Try direct query using run_in_executor
                 response = await loop.run_in_executor(
                     None,
@@ -440,7 +444,7 @@ class TenderTrailIntegration:
                     
                     # If the table exists but is empty, try to populate it
                     if not response.data:
-                        try:
+                        try: # Innermost try block
                             print("Adding default schema to empty target_schema table")
                             default_schema = self._get_default_target_schema()
                             
@@ -453,23 +457,22 @@ class TenderTrailIntegration:
                             )
                             
                             print("Successfully added default schema to target_schema")
-                        except Exception as e: # Corrected indentation for this except
+                        except Exception as e: # Matches innermost try
                             print(f"Error adding default schema: {e}")
                     
                     return # Exit if table exists (and potentially populated)
                 
-            except Exception as e:
-                # If the error indicates the table doesn't exist, log it
-                if "relation" in str(e) and "does not exist" in str(e):
-                    print(f"target_schema table doesn't exist, proceeding to creation check (if applicable).")
+            # <<< ADDED except block for the inner try >>>
+            except Exception as inner_e:
+                # If the error indicates the table doesn't exist, log it nicely
+                if "relation" in str(inner_e).lower() and "does not exist" in str(inner_e).lower():
+                    print(f"target_schema table check confirms: table does not exist.")
                 else:
                     # Log other errors encountered during the check
-                    print(f"Error checking target_schema existence: {e}")
-                    # Decide if we should stop or try to create. For now, let's proceed carefully.
-            
-            # If check failed or table doesn't exist, attempt creation or notify user
-            # NOTE: Supabase client library typically cannot create tables directly.
-            # This block primarily serves to inform the user.
+                    print(f"Error during target_schema existence check: {inner_e}")
+                # Allow execution to continue to the manual creation info block
+
+            # If check failed or table doesn't exist, inform user about manual creation
             print("Cannot create target_schema table directly via client library.")
             print("Please ensure the table exists or create it using the Supabase UI or SQL Editor with this schema:")
             print("""
@@ -484,6 +487,7 @@ class TenderTrailIntegration:
             # We'll continue with the in-memory default schema if creation/check fails
             print("Using in-memory default schema as fallback.")
             
+        # This except matches the OUTER try
         except Exception as general_e:
             print(f"General error in _create_target_schema_table: {general_e}")
             print("Continuing with in-memory schema as fallback.")
@@ -650,13 +654,17 @@ class TenderTrailIntegration:
             print("No tenders to insert")
             return 0
         
+        inserted_count = 0
+        tenders_to_insert = [] # Renamed from batch for clarity before the loop
+
         try:
-            print(f"Preparing to insert {len(normalized_tenders)} tenders")
-            
-            # Create a copy to avoid modifying the original
-            tenders_to_insert = []
-            inserted_count = 0
-            
+            print(f"Preparing to insert {len(normalized_tenders)} tenders into unified_tenders")
+
+            # Ensure necessary tables exist (or log if they don't)
+            if create_tables:
+                await self._create_unified_tenders_table()
+                await self._create_errors_table() # <<< ADDED CALL HERE
+
             # Field mapping between normalized tender fields and database fields
             field_mapping = {
                 "notice_title": "title",
@@ -679,8 +687,7 @@ class TenderTrailIntegration:
                 "raw_id": "raw_id",
                 "notice_id": "raw_id"  # Use notice_id as fallback for raw_id
             }
-            
-            # Try to load deep-translator if available
+
             translator = None
             try:
                 from deep_translator import GoogleTranslator
@@ -689,199 +696,221 @@ class TenderTrailIntegration:
             except ImportError:
                 print("deep-translator not available, text translation will be skipped")
 
-            # Check if unified_tenders table exists and create it if needed
-            if create_tables:
-                await self._create_unified_tenders_table()
-                
-            # Check if metadata column exists
             metadata_column_exists = False
             try:
-                # Perform a simple query that tries to access the metadata column
                 loop = asyncio.get_event_loop()
                 response = await loop.run_in_executor(
                     None,
                     lambda: self.supabase.table('unified_tenders').select('metadata').limit(1).execute()
                 )
-                if hasattr(response, 'data'):
+                if hasattr(response, 'data'): # Simple check if query succeeded at all
                     metadata_column_exists = True
-                    print("Metadata column exists in unified_tenders table")
+                    print("Metadata column assumed to exist in unified_tenders table after successful check.")
+                # No explicit else, as failure might be due to table not existing yet
             except Exception as e:
-                if "column" in str(e) and "does not exist" in str(e):
-                    print("Metadata column does not exist in unified_tenders table")
+                if "column" in str(e).lower() and "does not exist" in str(e).lower():
+                    print("Metadata column does not exist in unified_tenders table.")
+                elif "relation" in str(e).lower() and "does not exist" in str(e).lower():
+                    print("'unified_tenders' table likely doesn't exist yet.") # Handle case where table check fails because table is missing
                 else:
                     print(f"Error checking metadata column: {e}")
-            
-            # Process each tender
+
+
+            # Process each tender in batches
             batch_size = 50
             for i in range(0, len(normalized_tenders), batch_size):
-                batch = []
-                
-                # Process tenders in the current batch
-                for tender in normalized_tenders[i:i+batch_size]:
+                current_batch_data = [] # Data for Supabase upsert
+
+                # Process tenders in the current sub-batch
+                sub_batch = normalized_tenders[i:i+batch_size]
+                print(f"Processing batch {i//batch_size + 1}: {len(sub_batch)} tenders")
+
+                for tender in sub_batch:
                     try:
                         # Skip empty tenders
-                        if not tender:
+                        if not tender or not isinstance(tender, dict):
+                            print(f"Skipping invalid tender data: {type(tender)}")
                             continue
-                            
-                        # Create cleaned tender with correct field names for the database
+
                         cleaned_tender = {}
                         metadata = tender.get("metadata", {}) if isinstance(tender.get("metadata"), dict) else {}
-                        
+
+                        # --- Start Restored Tender Processing Logic --- 
                         # Map fields from normalized tender to database fields
                         for norm_field, db_field in field_mapping.items():
-                            # Only map field if it exists in the tender
                             if norm_field in tender and tender[norm_field] is not None and tender[norm_field] != "":
-                                # For text fields, handle translation if needed
+                                # Handle translation for specific text fields
                                 if db_field in ["title", "description"] and translator and isinstance(tender[norm_field], str):
-                                    # Check if translation is needed (non-English text)
-                                    text = tender[norm_field]
-                                    needs_translation = False
-                                    
-                                    # Check for non-ASCII characters that might indicate non-English text
-                                    if any(ord(c) > 127 for c in text):
-                                        needs_translation = True
-                                    
-                                    # Common non-English indicators
-                                    non_english_indicators = ['à', 'á', 'â', 'ã', 'ä', 'å', 'æ', 'ç', 'è', 'é', 'ê', 'ë', 
-                                                             'ì', 'í', 'î', 'ï', 'ñ', 'ò', 'ó', 'ô', 'õ', 'ö', 'ø', 'ù', 
-                                                             'ú', 'û', 'ü', 'ý', 'ÿ']
-                                    
-                                    if any(indicator in text.lower() for indicator in non_english_indicators):
-                                        needs_translation = True
-                                    
-                                    if needs_translation:
-                                        try:
-                                            # Use run_in_executor to run translation in a thread
-                                            loop = asyncio.get_event_loop()
-                                            translated = await loop.run_in_executor(
-                                                None,
-                                                lambda: translator.translate(text)
-                                            )
-                                            print(f"Translated text from '{text[:30]}...' to '{translated[:30]}...'")
-                                            cleaned_tender[db_field] = translated[:2000]
-                                        except Exception as te:
-                                            print(f"Translation error: {te}")
-                                            cleaned_tender[db_field] = text[:2000]
-                                    else:
-                                        cleaned_tender[db_field] = text[:2000]
-                                elif db_field == "contact_information":
-                                    # Combine contact email and phone if both exist
-                                    if norm_field == "contact_email" and "contact_email" in cleaned_tender:
-                                        # Skip if we've already set this from email
-                                        continue
-                                    
-                                    if norm_field == "contact_phone" and "contact_phone" in cleaned_tender:
-                                        # If email exists, append phone
-                                        if "contact_information" in cleaned_tender:
-                                            cleaned_tender["contact_information"] += f", Phone: {tender[norm_field]}"
-                                        else:
-                                            cleaned_tender["contact_information"] = f"Phone: {tender[norm_field]}"
-                                    elif norm_field == "contact_email":
-                                        if "contact_information" in cleaned_tender:
-                                            cleaned_tender["contact_information"] += f", Email: {tender[norm_field]}"
-                                        else:
-                                            cleaned_tender["contact_information"] = f"Email: {tender[norm_field]}"
-                                    else:
-                                        # Regular contact information
-                                        cleaned_tender["contact_information"] = str(tender[norm_field])[:500]
-                                elif db_field == "date_published" or db_field == "closing_date":
-                                    # Ensure dates are in proper ISO format
+                                    text_to_process = tender[norm_field]
                                     try:
-                                        # Check if it's already a datetime or ISO date string
-                                        if isinstance(tender[norm_field], (datetime.datetime, datetime.date)):
-                                            cleaned_tender[db_field] = tender[norm_field].isoformat()[:10]
-                                        else:
-                                            # Try various date formats
-                                            date_val = self._format_date(tender[norm_field])
-                                            if date_val:
-                                                cleaned_tender[db_field] = date_val
-                                    except Exception as de:
-                                        print(f"Date parsing error for {db_field}: {de}")
-                                elif isinstance(tender[norm_field], (dict, list)):
-                                    # Convert complex objects to JSON string
-                                    if db_field == "keywords" and isinstance(tender[norm_field], list):
-                                        # Join list of keywords with commas for better display
-                                        cleaned_tender[db_field] = ", ".join(str(k) for k in tender[norm_field][:20])
+                                        # Simple check for non-English chars (can be improved)
+                                        needs_translation = any(ord(c) > 127 for c in text_to_process)
+                                        translated_text = text_to_process # Default to original
+                                        
+                                        if needs_translation:
+                                            # Check cache first
+                                            if text_to_process in self.translation_cache:
+                                                translated_text = self.translation_cache[text_to_process]
+                                                print(f"Cache hit for translation: '{text_to_process[:30]}...'")
+                                            else:
+                                                # Translate using run_in_executor
+                                                loop = asyncio.get_event_loop()
+                                                print(f"Translating text: '{text_to_process[:30]}...'")
+                                                translated_text = await loop.run_in_executor(
+                                                    None,
+                                                    lambda: translator.translate(text_to_process)
+                                                )
+                                                # Cache the result
+                                                if translated_text:
+                                                    self.translation_cache[text_to_process] = translated_text
+                                                print(f"Translated text to: '{translated_text[:30]}...'")
+                                        
+                                        cleaned_tender[db_field] = translated_text[:2000] # Limit length
+                                    except Exception as te:
+                                        print(f"Translation error for '{text_to_process[:30]}...': {te}")
+                                        cleaned_tender[db_field] = text_to_process[:2000] # Use original on error
                                     else:
-                                        cleaned_tender[db_field] = json.dumps(tender[norm_field])[:2000]
+                                        cleaned_tender[db_field] = text_to_process[:2000] # Non-translatable or already English
+                                
+                                # Handle combined contact information
+                                elif db_field == "contact_information":
+                                    current_contact = cleaned_tender.get(db_field, "")
+                                    new_info = str(tender[norm_field])[:500]
+                                    if norm_field == "contact_email":
+                                        new_info = f"Email: {new_info}"
+                                    elif norm_field == "contact_phone":
+                                         new_info = f"Phone: {new_info}"
+                                    # Append new info if current info exists
+                                    if current_contact:
+                                        cleaned_tender[db_field] = f"{current_contact}, {new_info}"
+                                    else:
+                                         cleaned_tender[db_field] = new_info
+                                
+                                # Handle date fields
+                                elif db_field in ["date_published", "closing_date"]:
+                                    iso_date = self._parse_date(tender[norm_field]) # Use helper method
+                                    if iso_date:
+                                        cleaned_tender[db_field] = iso_date
+                                    else:
+                                        print(f"Could not parse date for {db_field}: {tender[norm_field]}")
+                                        
+                                # Handle complex types (dict/list -> JSON string), ensure keywords are joined
+                                elif isinstance(tender[norm_field], (dict, list)):
+                                    if db_field == "keywords" and isinstance(tender[norm_field], list):
+                                        # Join list of keywords with commas, limit items and length
+                                        kw_str = ", ".join(str(k)[:50] for k in tender[norm_field][:20])
+                                        cleaned_tender[db_field] = kw_str[:1000]
+                                    else:
+                                        try:
+                                            cleaned_tender[db_field] = json.dumps(tender[norm_field])[:2000] # Limit length
+                                        except TypeError as json_e:
+                                             print(f"Error serializing field {db_field} to JSON: {json_e}")
+                                             cleaned_tender[db_field] = str(tender[norm_field])[:2000] # Fallback to string
                                 else:
+                                    # Default: convert to string and limit length
                                     cleaned_tender[db_field] = str(tender[norm_field])[:2000]
-                        
-                        # Ensure required fields exist with defaults
-                        if "title" not in cleaned_tender or not cleaned_tender["title"]:
-                            if "notice_title" in tender and tender["notice_title"]:
-                                cleaned_tender["title"] = tender["notice_title"]
-                            else:
-                                cleaned_tender["title"] = f"Tender from {tender.get('source', 'Unknown')}"
-                        
-                        if "source" not in cleaned_tender or not cleaned_tender["source"]:
-                            cleaned_tender["source"] = "Unknown"
-                        
-                        if "description" not in cleaned_tender or not cleaned_tender["description"]:
-                            # Try to create a description from other fields
-                            description_parts = []
-                            for field in ["notice_type", "location", "country", "issuing_authority"]:
-                                if field in tender and tender[field]:
-                                    description_parts.append(f"{field.replace('_', ' ').title()}: {tender[field]}")
+
+                        # Ensure required fields have defaults
+                        if not cleaned_tender.get("title"):
+                            cleaned_tender["title"] = f"Tender from {tender.get('source', 'Unknown')}"
+                        if not cleaned_tender.get("source"):
+                            cleaned_tender["source"] = self._current_source or "Unknown"
+                        if not cleaned_tender.get("description"):
+                            cleaned_tender["description"] = "No detailed description available."
+                        if not cleaned_tender.get("raw_id"):
+                            cleaned_tender["raw_id"] = tender.get("id", str(uuid.uuid4()))
                             
-                            if description_parts:
-                                cleaned_tender["description"] = " | ".join(description_parts)
-                            else:
-                                cleaned_tender["description"] = "No detailed information available"
-                        
-                        # Add raw_id if not present
-                        if "raw_id" not in cleaned_tender:
-                            # Try to get raw_id from tender
-                            if "raw_id" in tender:
-                                cleaned_tender["raw_id"] = str(tender["raw_id"])
-                            elif "notice_id" in tender:
-                                cleaned_tender["raw_id"] = str(tender["notice_id"])
-                            else:
-                                # Generate a unique ID
-                                cleaned_tender["raw_id"] = str(uuid.uuid4())
-                        
-                        # Add processed_at if not present
-                        if "processed_at" not in cleaned_tender:
-                            cleaned_tender["processed_at"] = self._get_current_timestamp()
-                        
-                        # Add metadata column if it exists in the database and we have metadata
+                        # Add processed_at timestamp
+                        cleaned_tender["processed_at"] = self._get_current_timestamp()
+
+                        # Add metadata if column exists and data is present
                         if metadata_column_exists and metadata:
-                            cleaned_tender["metadata"] = json.dumps(metadata)
-                            
-                        # Add tender to batch
-                        batch.append(cleaned_tender)
-                    except Exception as e:
-                        print(f"Error processing tender: {e}")
-                
-                if not batch:
-                    continue
-                    
-                # Insert batch
-                print(f"Inserting batch {i//batch_size + 1}/{ (len(normalized_tenders) + batch_size - 1) // batch_size}")
-                
-                try:
-                    # Insert tender batch using run_in_executor
-                    loop = asyncio.get_event_loop()
-                    response = await loop.run_in_executor(
-                        None,
-                        lambda: self.supabase.table('unified_tenders').insert(batch).execute()
-                    )
-                    
-                    # Check response
-                    if hasattr(response, 'data'):
-                        inserted_count += len(response.data)
-                    else:
-                        print("Warning: No data returned from insert operation")
-                except Exception as e:
-                    print(f"Error inserting batch: {e}")
-                    # Continue with next batch
-            
-            return inserted_count
-            
+                            try:
+                                cleaned_tender['metadata'] = json.dumps(metadata)
+                            except TypeError as json_meta_e:
+                                print(f"Error serializing metadata to JSON: {json_meta_e}")
+                                cleaned_tender['metadata'] = json.dumps(str(metadata)) # Fallback
+                        # --- End Restored Tender Processing Logic --- 
+
+                        # Add the fully processed tender to the list for insertion
+                        if cleaned_tender: # Ensure we didn't add empty dicts
+                            current_batch_data.append(cleaned_tender)
+
+                    except Exception as tender_proc_e:
+                        print(f"CRITICAL Error processing tender {tender.get('id', 'N/A')} for insertion: {tender_proc_e}")
+                        traceback.print_exc()
+                        # Log this specific error to the errors table
+                        try:
+                            error_payload = {
+                                "source": self._current_source or tender.get('source', "unknown"),
+                                "error_message": f"Tender processing failed: {tender_proc_e}",
+                                "tender_data": json.dumps(tender, default=str), # Log original tender
+                                "context": "Individual tender processing failure"
+                            }
+                            loop = asyncio.get_event_loop()
+                            await loop.run_in_executor(
+                                None,
+                                lambda: self.supabase.table('errors').insert(error_payload).execute()
+                             )
+                        except Exception as log_proc_err_e:
+                            print(f"Failed to log tender processing error to 'errors' table: {log_proc_err_e}")
+
+                # Insert the prepared batch into the database
+                if current_batch_data:
+                    print(f"Attempting to upsert batch of {len(current_batch_data)} tenders...")
+                    try:
+                        print(f"DEBUG: Sample data for batch upsert: {str(current_batch_data[0])[:500]}...")
+                    except Exception as log_e:
+                        print(f"DEBUG: Error logging sample batch data: {log_e}")
+
+                    try:
+                        loop = asyncio.get_event_loop()
+                        # Use upsert with source and raw_id as conflict identifiers
+                        response = await loop.run_in_executor(
+                            None,
+                            lambda: self.supabase.table('unified_tenders')
+                                        .upsert(current_batch_data, on_conflict='source,raw_id')
+                                        .execute()
+                        )
+                        if hasattr(response, 'data') and response.data:
+                           print(f"Successfully upserted batch. Response count: {len(response.data)}")
+                           inserted_count += len(response.data)
+                        elif hasattr(response, 'status_code') and 200 <= response.status_code < 300:
+                            # Sometimes upsert might return success status without data array
+                            print(f"Successfully upserted batch (status code: {response.status_code}). Assuming count: {len(current_batch_data)}")
+                            inserted_count += len(current_batch_data) # Assume all succeeded if status is ok
+                        else:
+                           print(f"Upsert batch completed but response indicates potential issue or no data returned. Response: {response}")
+                           # Log the failed batch to the errors table for review
+                           # (Code for logging already exists below)
+
+                    except Exception as db_e:
+                        print(f"DATABASE UPSERT ERROR for batch: {db_e}")
+                        traceback.print_exc()
+                        # Log the entire batch that failed
+                        try:
+                            error_payload = {
+                                "source": self._current_source or "unknown", 
+                                "error_message": str(db_e),
+                                "tender_data": json.dumps(current_batch_data, default=str), 
+                                "context": "Batch upsert failure"
+                            }
+                            await loop.run_in_executor(
+                                None,
+                                lambda: self.supabase.table('errors').insert(error_payload).execute()
+                             )
+                            print("Logged batch upsert error to 'errors' table.")
+                        except Exception as log_err_e:
+                            print(f"Failed to log batch upsert error to 'errors' table: {log_err_e}")
+
+        # Outer exception handler for the whole insertion process
         except Exception as e:
-            print(f"Error in _insert_normalized_tenders: {e}")
-            return 0
-    
+            print(f"CRITICAL Error during overall tender insertion process: {e}")
+            traceback.print_exc()
+
+        print(f"Total successfully upserted/inserted tenders in this run: {inserted_count}")
+        return inserted_count
+
     async def _create_unified_tenders_table(self) -> None:
         """Create unified_tenders table if it doesn't exist with all required columns."""
         try:
@@ -942,50 +971,48 @@ class TenderTrailIntegration:
             print(f"Error in _create_unified_tenders_table: {e}")
 
     async def _create_errors_table(self) -> None:
-        """Create normalization_errors table if it doesn't exist."""
+        """Create the 'errors' table if it doesn't exist."""
         loop = asyncio.get_event_loop()
-        
-        try:
-            # Check if table already exists
-            table_exists = False
-            try:
-                # Try direct query to see if table exists using run_in_executor
+        table_name = 'errors'
+        try: # Outer try for the whole operation (Line 874)
+            # Check if table exists
+            try: # Inner try for the check query
                 response = await loop.run_in_executor(
                     None,
-                    lambda: self.supabase.table('normalization_errors').select('id').limit(1).execute()
+                    lambda: self.supabase.table(table_name).select('id', count='exact').limit(1).execute()
                 )
-                
-                if hasattr(response, 'data'):
-                    table_exists = True
-                    print("normalization_errors table already exists")
-                    return
+                if response.count is not None:
+                     print(f"'{table_name}' table already exists.")
+                     return # Table exists, nothing more to do
             except Exception as e:
-                if "relation" in str(e) and "does not exist" in str(e):
-                    print("normalization_errors table doesn't exist, but may be created by another process")
-                else:
-                    print(f"Error checking normalization_errors table: {e}")
-            
-            if table_exists:
-                return
-            
-            # In API-only mode, we can't create tables directly
-            print("Cannot create normalization_errors table in API-only mode")
-            print("Please create the table using the Supabase UI or SQL Editor with this schema:")
+                 # Handle errors during the check phase
+                 if "relation" in str(e).lower() and "does not exist" in str(e).lower():
+                     print(f"'{table_name}' table does not exist. Will proceed to inform user for manual creation.")
+                 else:
+                     print(f"Error checking '{table_name}' existence: {e}")
+                     # Depending on error, may want to raise or return here instead of proceeding
+
+            # If code reaches here, table either doesn't exist or the check failed.
+            # Inform user about manual creation as client libs typically can't CREATE TABLE.
+            print(f"Cannot create '{table_name}' table directly via client library.")
+            print("Please ensure the table exists or create it using the Supabase UI or SQL Editor.")
+            print("Recommended schema:")
+            # Correctly formatted triple-quoted string
             print("""
-            CREATE TABLE IF NOT EXISTS public.normalization_errors (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                source TEXT NOT NULL,
-                error_type TEXT NOT NULL,
-                error_message TEXT NOT NULL,
-                tender_data TEXT,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+            CREATE TABLE IF NOT EXISTS public.errors (
+                id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+                source TEXT,
+                error_message TEXT,
+                tender_data JSONB,
+                context TEXT
             );
             """)
-            
-            # We'll continue without error tracking in this case
-            print("Will continue without error tracking capabilities")
-        except Exception as e:
-            print(f"Error in _create_errors_table: {e}")
+            # Consider raising an exception or returning a status if table is essential
+
+        # <<< Correctly aligned except block for the outer try (Line 874) >>>
+        except Exception as general_e:
+            print(f"General error during '{table_name}' table check/creation info: {general_e}")
 
     def _insert_error(self, source: str, error_type: str, error_message: str, tender_data: str = "") -> None:
         """Log an error to the console."""
