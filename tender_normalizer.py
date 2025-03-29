@@ -439,68 +439,73 @@ class TenderNormalizer:
             
     def _construct_messages(self, tender_data: Dict[str, Any], source_schema: Dict[str, Any] = None, target_schema: Dict[str, Any] = None) -> List[Dict[str, str]]:
         """
-        Construct the messages for the LLM.
+        Construct the messages to send to the LLM.
         
         Args:
             tender_data: The tender data to normalize
-            source_schema: Schema describing the source data format
-            target_schema: Schema describing the target data format
+            source_schema: The source schema (default: None)
+            target_schema: The target schema (default: None)
             
         Returns:
-            List of messages for the LLM
+            The messages to send to the LLM
         """
-        # Ensure safe copying of dictionaries
-        tender_data_safe = self._safe_copy(tender_data)
-        source_schema_safe = self._safe_copy(source_schema) if source_schema else {}
-        target_schema_safe = self._safe_copy(target_schema) if target_schema else {}
-        
-        import json
-        
-        # Prepare the system message
-        system_message = {
-            "role": "system",
-            "content": """You are a specialized tender normalization assistant. Your task is to take raw tender data and normalize it according to a target schema.
-Extract the relevant information from the input data and structure it according to the target schema.
-If a field is not present in the input, leave it empty in the output.
-Your output must be a valid JSON object that follows the target schema exactly.
-"""
-        }
-        
-        # Prepare the user message
-        user_content = "Please normalize the following tender data:"
-        user_content += f"\n\nInput tender data:\n{json.dumps(tender_data_safe, indent=2)}"
-        
-        if source_schema_safe:
-            user_content += f"\n\nSource schema:\n{json.dumps(source_schema_safe, indent=2)}"
+        try:
+            # Ensure we have at least empty dicts for schemas
+            source_schema = source_schema or {}
+            target_schema = target_schema or {}
             
-        if target_schema_safe:
-            user_content += f"\n\nTarget schema:\n{json.dumps(target_schema_safe, indent=2)}"
-        else:
-            # Provide a default target schema if none is provided
-            default_schema = {
-                "title": "Tender title",
-                "description": "Tender description",
-                "date_published": "Publication date (YYYY-MM-DD)",
-                "closing_date": "Closing date (YYYY-MM-DD)",
-                "tender_type": "Type of tender",
-                "tender_value": "Monetary value of the tender",
-                "tender_currency": "Currency code (e.g., USD)",
-                "location": "Geographical location",
-                "issuing_authority": "Organization issuing the tender",
-                "keywords": "Keywords or tags",
-                "contact_information": "Contact details",
-                "source": "Source of the tender"
+            # Create a system prompt that explains the task
+            system_message = {
+                "role": "system",
+                "content": """You are a highly accurate data normalization assistant. Your task is to extract structured data from tender notices and convert it to a standardized format.
+
+IMPORTANT INSTRUCTION ABOUT JSON OUTPUT:
+1. You MUST return ONLY valid JSON that matches the target schema exactly.
+2. All string values MUST be properly escaped. Ensure all quote marks ("), backslashes (\\), and control characters within strings are properly escaped.
+3. Do not truncate string values - provide the complete text.
+4. Ensure all JSON objects are properly closed with matching braces.
+5. Only use double quotes (") for JSON property names and string values, never single quotes (').
+6. DO NOT include any explanation text outside the JSON object.
+7. Your entire response must be a single valid parseable JSON object.
+
+Example of valid response format:
+```json
+{
+  "title": "Example tender title",
+  "description": "This is a \"quoted\" description with properly escaped quotes.",
+  "date_published": "2023-04-15"
+}
+```"""
             }
-            user_content += f"\n\nTarget schema:\n{json.dumps(default_schema, indent=2)}"
-        
-        user_content += "\n\nPlease output only the normalized JSON without any additional text."
-        
-        user_message = {
-            "role": "user",
-            "content": user_content
-        }
-        
-        return [system_message, user_message]
+            
+            # Use a simplified version of tender_data to avoid huge strings
+            safe_tender = self._safe_copy(tender_data)
+            
+            # Create a user message that includes the tender data and schemas
+            user_message = {
+                "role": "user",
+                "content": f"""Input tender data:
+{json.dumps(safe_tender, indent=2, ensure_ascii=False)}
+
+Source schema:
+{json.dumps(source_schema, indent=2, ensure_ascii=False)}
+
+Target schema:
+{json.dumps(target_schema, indent=2, ensure_ascii=False)}
+
+Convert the input tender data from its original format to match the target schema format.
+Use the source schema to understand the input data structure.
+Return ONLY the JSON object with the normalized data."""
+            }
+            
+            return [system_message, user_message]
+        except Exception as e:
+            print(f"Error constructing messages: {e}")
+            # Return a simplified fallback message
+            return [
+                {"role": "system", "content": "Normalize the tender data to match the target schema."},
+                {"role": "user", "content": f"Tender: {str(tender_data)[:1000]}\nTarget: {str(target_schema)[:500]}"}
+            ]
         
     def _safe_copy(self, obj):
         """
