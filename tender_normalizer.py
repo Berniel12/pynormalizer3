@@ -559,36 +559,65 @@ Your output must be a valid JSON object that follows the target schema exactly.
             # Extract JSON from the response
             import json
             import re
-            
-            # Find JSON in the content (in case there's surrounding text)
-            json_matches = re.findall(r'```(?:json)?\s*([\s\S]*?)```', content)
-            
-            if json_matches:
-                # Use the first JSON block found
-                json_str = json_matches[0]
-            else:
-                # Try to find anything that looks like JSON
-                if content.strip().startswith('{') and content.strip().endswith('}'):
-                    json_str = content.strip()
+
+            # Attempt to strip markdown code fences first
+            json_str = None
+            if content.strip().startswith("```json"):
+                json_str = content.strip()[7:].strip() # Remove ```json and surrounding whitespace
+                if json_str.endswith("```"):
+                    json_str = json_str[:-3].strip() # Remove trailing ``` and surrounding whitespace
+            elif content.strip().startswith("```"):
+                 json_str = content.strip()[3:].strip() # Remove ``` and surrounding whitespace
+                 if json_str.endswith("```"):
+                    json_str = json_str[:-3].strip() # Remove trailing ``` and surrounding whitespace
+
+            # If stripping worked, try parsing directly
+            if json_str:
+                 try:
+                     normalized_tender = json.loads(json_str)
+                     if not isinstance(normalized_tender, dict):
+                         print(f"Parsed JSON from stripped content is not a dictionary: {type(normalized_tender)}")
+                         json_str = None # Mark as failed to allow regex fallback
+                     else:
+                         print("DEBUG: Successfully parsed JSON after stripping fences.")
+                         return normalized_tender # Success!
+                 except json.JSONDecodeError as e:
+                     print(f"DEBUG: Error decoding JSON after stripping fences: {e}")
+                     print(f"DEBUG: Stripped JSON string was: {json_str[:100]}...")
+                     json_str = None # Mark as failed to allow regex fallback
+
+            # If stripping didn't work or failed, fall back to regex
+            if not json_str:
+                print("DEBUG: Falling back to regex for JSON extraction.")
+                json_matches = re.findall(r'```(?:json)?\\s*([\\s\\S]*?)```', content)
+
+                if json_matches:
+                    # Use the first JSON block found
+                    json_str = json_matches[0].strip() # Add strip here too
                 else:
-                    # One more attempt to extract just the JSON object
-                    json_match = re.search(r'({[\s\S]*})', content)
-                    if json_match:
-                        json_str = json_match.group(1)
+                    # Try to find anything that looks like JSON
+                    if content.strip().startswith('{') and content.strip().endswith('}'):
+                        json_str = content.strip()
                     else:
-                        print(f"No JSON found in response: {content[:100]}...")
-                        return None
-                        
-            # Parse the JSON
+                        # One more attempt to extract just the JSON object
+                        json_match = re.search(r'({[\\s\\S]*})', content)
+                        if json_match:
+                            json_str = json_match.group(1).strip() # Add strip here
+                        else:
+                            print(f"No JSON found in response (after regex): {content[:100]}...")
+                            return None
+
+            # Parse the JSON found via regex or other fallbacks
             try:
                 normalized_tender = json.loads(json_str)
                 if not isinstance(normalized_tender, dict):
-                    print(f"Parsed JSON is not a dictionary: {type(normalized_tender)}")
+                    print(f"Parsed JSON from regex/fallback is not a dictionary: {type(normalized_tender)}")
                     return None
+                print("DEBUG: Successfully parsed JSON using regex/fallback.")
                 return normalized_tender
             except json.JSONDecodeError as e:
-                print(f"Error decoding JSON: {e}")
-                print(f"JSON string: {json_str[:100]}...")
+                print(f"Error decoding JSON (from regex/fallback): {e}")
+                print(f"JSON string was: {json_str[:100]}...")
                 return None
                 
         except Exception as e:
