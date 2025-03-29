@@ -175,15 +175,20 @@ Extracted data (JSON format):"""
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.3,
-            "max_tokens": 1000
+            "max_tokens": 4096
         }
         
         try:
-            response = requests.post(self.base_url, headers=self.headers, json=payload)
+            # Add a timeout (in seconds)
+            timeout_seconds = 120 
+            response = requests.post(self.base_url, headers=self.headers, json=payload, timeout=timeout_seconds)
             response.raise_for_status()
             return response.json()["choices"][0]["message"]["content"]
+        except requests.exceptions.Timeout:
+            print(f"Error calling OpenAI API (GPT-4o Mini): Request timed out after {timeout_seconds} seconds.")
+            return ""
         except Exception as e:
-            print(f"Error calling OpenAI API: {e}")
+            print(f"Error calling OpenAI API (GPT-4o Mini): {e}")
             return ""
 
 class CohereProvider(LLMProvider):
