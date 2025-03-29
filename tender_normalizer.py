@@ -359,7 +359,7 @@ class LLMProviderFactory:
         """
         print(f"INFO: LLM Provider Factory called with type '{provider_type}'. Forcing GPT-4o Mini.")
         # Always return GPT4oMiniProvider, ignore provider_type and model arguments
-            return GPT4oMiniProvider(api_key)
+        return GPT4oMiniProvider(api_key)
 
 class TenderNormalizer:
     """Main class for normalizing tender data using LLMs."""
